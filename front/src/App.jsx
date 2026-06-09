@@ -1,0 +1,1983 @@
+import { useEffect, useMemo, useState } from 'react';
+import {
+  AlertTriangle,
+  Boxes,
+  ClipboardList,
+  History,
+  IndianRupee,
+  PackageCheck,
+  Pencil,
+  Printer,
+  ReceiptText,
+  RefreshCcw,
+  Save,
+  Search,
+  ShoppingCart,
+  Store,
+  Trash2,
+  Upload,
+  Users
+} from 'lucide-react';
+
+const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8080/api';
+const DEFAULT_ADMIN_PASSWORD = process.env.REACT_APP_ADMIN_PASSWORD || '1234';
+const PAGE_SIZE = 50;
+
+function money(value) {
+  return `Rs ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+async function api(path, options = {}) {
+  const isFormData = options.body instanceof FormData;
+  const response = await fetch(`${API_BASE}${path}`, {
+    headers: isFormData ? (options.headers || {}) : { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    ...options
+  });
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try {
+      const data = await response.json();
+      message = data.message || data.detail || data.error || message;
+    } catch {
+      // Keep the HTTP fallback.
+    }
+    throw new Error(message);
+  }
+  if (response.status === 204) return null;
+  return response.json();
+}
+
+function billLabel(bill) {
+  return bill.billNumber || bill.invoiceNumber || `Bill #${bill.id}`;
+}
+
+function billAmount(bill) {
+  return bill.grandTotal ?? bill.finalAmount ?? 0;
+}
+
+function printUrlForBill(bill) {
+  if (bill.printUrl) {
+    if (bill.printUrl.startsWith('http')) return bill.printUrl;
+    return `${API_BASE}${bill.printUrl.replace(/^\/api/, '')}`;
+  }
+  return `${API_BASE}/bills/${bill.id}/print`;
+}
+
+function calculatedPurchasePrice(row) {
+  if (row.purchaseMode === 'PERCENT') {
+    const percent = Math.min(100, Math.max(0, Number(row.purchasePercent || 0)));
+    return round2(Number(row.sellingPrice || 0) * (1 - percent / 100));
+  }
+  return Number(row.purchasePrice || 0);
+}
+
+function withPreviewIds(rows) {
+  return rows.map((row, index) => ({
+    ...row,
+    _previewId: row._previewId || `${Date.now()}-${index}-${Math.random().toString(36).slice(2)}`
+  }));
+}
+
+function App() {
+  const [tab, setTab] = useState('billing');
+  const [status, setStatus] = useState('');
+  const [savingRack, setSavingRack] = useState(false);
+  const [stats, setStats] = useState(null);
+  const [brands, setBrands] = useState([]);
+  const [catalogModels, setCatalogModels] = useState([]);
+  const [models, setModels] = useState([]);
+  const [parts, setParts] = useState([]);
+  const [allParts, setAllParts] = useState([]);
+  const [bills, setBills] = useState([]);
+  const [purchases, setPurchases] = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
+  const [selectedBrand, setSelectedBrand] = useState('');
+  const [selectedModelName, setSelectedModelName] = useState('');
+  const [selectedSeries, setSelectedSeries] = useState('');
+  const [partSearch, setPartSearch] = useState('');
+  const [cart, setCart] = useState([]);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [adminPassword] = useState(DEFAULT_ADMIN_PASSWORD);
+  const [customer, setCustomer] = useState({
+    customerName: 'Walk-in Customer',
+    customerGstin: '',
+    customerAddress: '',
+    customerMobile: '',
+    invoiceType: 'NORMAL',
+    billingDate: new Date().toISOString().slice(0, 10),
+    supplyType: 'INTRA_STATE',
+    paymentMode: 'CASH',
+    notes: ''
+  });
+
+  const refresh = async () => {
+    const [brandData, partData, billData, purchaseData, supplierData, statData] = await Promise.all([
+      api('/brands'),
+      api('/parts'),
+      api('/bills'),
+      api('/purchases'),
+      api('/suppliers'),
+      api('/dashboard/stats')
+    ]);
+    setBrands(brandData);
+    const modelLists = await Promise.all(brandData.map((brand) => api(`/brands/${brand.id}/models`).catch(() => [])));
+    setCatalogModels(modelLists.flat());
+    setAllParts(partData);
+    setBills(billData);
+    setPurchases(purchaseData);
+    setSuppliers(supplierData);
+    setStats(statData);
+  };
+
+  useEffect(() => {
+    refresh().catch((error) => setStatus(error.message));
+  }, []);
+
+  useEffect(() => {
+    if (status !== 'Admin access unlocked.') return undefined;
+    const timer = window.setTimeout(() => setStatus(''), 2500);
+    return () => window.clearTimeout(timer);
+  }, [status]);
+
+  useEffect(() => {
+    if (!selectedBrand) {
+      setModels([]);
+      setSelectedModelName('');
+      setSelectedSeries('');
+      setParts([]);
+      return;
+    }
+    api(`/brands/${selectedBrand}/models`)
+      .then((data) => {
+        setModels(data);
+        setSelectedModelName('');
+        setSelectedSeries('');
+        setParts([]);
+      })
+      .catch((error) => setStatus(error.message));
+  }, [selectedBrand]);
+
+  useEffect(() => {
+    if (!selectedSeries) {
+      setParts([]);
+      return;
+    }
+    api(`/models/${selectedSeries}/parts`)
+      .then(setParts)
+      .catch((error) => setStatus(error.message));
+  }, [selectedSeries]);
+
+  const filteredParts = useMemo(() => {
+    const needle = partSearch.trim().toLowerCase();
+    const source = selectedSeries ? parts : allParts;
+    if (!needle) return source;
+    return source.filter((part) =>
+      `${part.name} ${part.companyName || ''} ${part.partNumber || ''} ${part.serialNo || ''} ${part.hsnCode || ''} ${part.rackNumber || ''} ${part.sellingPrice || ''}`.toLowerCase().includes(needle)
+    );
+  }, [allParts, parts, partSearch, selectedSeries]);
+
+  const totals = useMemo(() => {
+    const subtotal = customer.invoiceType === 'GST'
+      ? cart.reduce((sum, item) => sum + item.taxableValue, 0)
+      : cart.reduce((sum, item) => sum + item.lineTotal, 0);
+    const gstTotal = customer.invoiceType === 'GST' ? cart.reduce((sum, item) => sum + item.gstAmount, 0) : 0;
+    const grandTotal = subtotal + gstTotal;
+    const cgst = customer.supplyType === 'INTRA_STATE' ? gstTotal / 2 : 0;
+    const sgst = customer.supplyType === 'INTRA_STATE' ? gstTotal / 2 : 0;
+    const igst = customer.supplyType === 'INTER_STATE' ? gstTotal : 0;
+    return { subtotal, gstTotal, cgst, sgst, igst, grandTotal };
+  }, [cart, customer.invoiceType, customer.supplyType]);
+
+  const addToCart = (part) => {
+    setCart((current) => {
+      const existing = current.find((item) => item.partId === part.id);
+      if (existing) {
+        if (existing.quantity + 1 > part.stockLevel) {
+          setStatus(`Only ${part.stockLevel} units available for ${part.name}`);
+          return current;
+        }
+        return current.map((item) => item.partId === part.id ? makeCartLine(part, item.quantity + 1, item.discountAmount) : item);
+      }
+      if (part.stockLevel < 1) {
+        setStatus(`${part.name} is out of stock.`);
+        return current;
+      }
+      return [...current, makeCartLine(part, 1, 0)];
+    });
+  };
+
+  const updateCart = (partId, patch) => {
+    setCart((current) => current.map((item) => {
+      if (item.partId !== partId) return item;
+      const part = allParts.find((candidate) => candidate.id === partId) || parts.find((candidate) => candidate.id === partId);
+      const quantityInput = patch.quantity !== undefined ? cleanNumberInput(patch.quantity) : item.quantity;
+      if (quantityInput === '') {
+        return makeCartLine(part, '', item.discountAmount);
+      }
+      const nextQuantity = Math.max(1, Number(quantityInput || 1));
+      const safeQuantity = Math.min(part.stockLevel, nextQuantity);
+      const gross = Number(part.sellingPrice || 0) * safeQuantity;
+      const discount = Math.min(gross, Math.max(0, Number(cleanNumberInput(patch.discountAmount ?? item.discountAmount) || 0)));
+      return makeCartLine(part, safeQuantity, discount);
+    }));
+  };
+
+  const saveBill = async () => {
+    if (!cart.length) {
+      setStatus('Add at least one part before saving a bill.');
+      return;
+    }
+    if (cart.some((item) => Number(item.quantity || 0) < 1)) {
+      setStatus('Enter quantity for every item before saving the bill.');
+      return;
+    }
+    const password = window.prompt('Enter admin password to save bill');
+    if (password !== adminPassword) {
+      setStatus('Wrong password.');
+      return;
+    }
+    const gstin = customer.customerGstin.trim().toUpperCase();
+    if (customer.invoiceType === 'GST' && gstin && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstin)) {
+      setStatus('Customer GSTIN must be 15 characters, for example 27ABCDE1234F1Z5. Leave it blank for an unregistered GST bill.');
+      return;
+    }
+    try {
+      const bill = await api('/bills', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...customer,
+          customerGstin: gstin,
+          items: cart.map((item) => ({
+            partId: item.partId,
+            quantity: item.quantity,
+            discountAmount: item.discountAmount
+          }))
+        })
+      });
+      setStatus(`Saved ${billLabel(bill)}. Stock has been deducted.`);
+      setCart([]);
+      await refresh();
+      window.open(printUrlForBill(bill), '_blank');
+    } catch (error) {
+      setStatus(error.message);
+    }
+  };
+
+  const createPart = async (payload) => {
+    try {
+      const part = await api('/parts', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setStatus(`${part.name} added to inventory with ${part.stockLevel} units.`);
+      await refresh();
+      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
+      return true;
+    } catch (error) {
+      setStatus(error.message);
+      return false;
+    }
+  };
+
+  const cancelBill = async (bill) => {
+    const password = window.prompt(`Enter admin password to cancel ${bill.billNumber}`);
+    if (password !== adminPassword) {
+      setStatus('Wrong password.');
+      return;
+    }
+    if (!window.confirm(`Cancel ${bill.billNumber} and restore stock?`)) return;
+    try {
+      await api(`/bills/${bill.id}/cancel`, { method: 'POST' });
+      setStatus(`${bill.billNumber} cancelled and stock restored.`);
+      await refresh();
+    } catch (error) {
+      setStatus(error.message);
+    }
+  };
+
+  const createSupplier = async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      await api('/suppliers', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: form.get('name'),
+          contactPerson: form.get('contactPerson'),
+          phone: form.get('phone'),
+          address: form.get('address'),
+          defaultDiscount: Number(form.get('defaultDiscount') || 0)
+        })
+      });
+      event.currentTarget.reset();
+      setStatus('Supplier saved.');
+      await refresh();
+    } catch (error) {
+      setStatus(error.message);
+    }
+  };
+
+  const createPurchase = async (payload) => {
+    try {
+      const purchase = await api('/purchases', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setStatus(`Dealer purchase saved. Stock increased by ${purchase.items.reduce((sum, item) => sum + item.quantity, 0)} units.`);
+      await refresh();
+      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
+      return true;
+    } catch (error) {
+      setStatus(error.message);
+      return false;
+    }
+  };
+
+  const createVehicleModel = async (payload) => {
+    const model = await api('/models', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    setStatus(`Vehicle model saved: ${modelLabel(model)}.`);
+    await refresh();
+    return model;
+  };
+
+  const unlockAdmin = (password) => {
+    if (password === adminPassword) {
+      setAdminUnlocked(true);
+      setStatus('Admin access unlocked.');
+      return true;
+    }
+    setStatus('Wrong password.');
+    return false;
+  };
+
+  const updatePart = async (part, patch) => {
+    setSavingRack(true);
+    try {
+      const payload = {
+        imageUrl: part.imageUrl,
+        name: patch.name ?? part.name,
+        partNumber: patch.partNumber ?? part.partNumber ?? '',
+        serialNo: patch.serialNo ?? part.serialNo ?? '',
+        hsnCode: patch.hsnCode ?? part.hsnCode ?? '',
+        companyName: patch.companyName ?? part.companyName ?? '',
+        carCompatibility: patch.carCompatibility ?? part.carCompatibility ?? 'Universal',
+        stockLevel: Number(patch.stockLevel ?? part.stockLevel ?? 0),
+        warehouseLocation: part.warehouseLocation || 'Main Warehouse',
+        section: part.section || '',
+        rackNumber: patch.rackNumber ?? part.rackNumber ?? '',
+        shelfBin: part.shelfBin || '',
+        supplier: part.supplier || '',
+        costPrice: Number(patch.costPrice ?? part.costPrice ?? 0),
+        sellingPrice: Number(patch.sellingPrice ?? part.sellingPrice ?? 0),
+        purchaseDiscount: Number(patch.purchaseDiscount ?? part.purchaseDiscount ?? 0),
+        gstRate: Number(part.gstRate || 0),
+        modelIds: patch.modelIds ?? (part.compatibleModels || []).map((model) => model.id)
+      };
+      await api(`/parts/${part.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      });
+      setStatus(`Updated ${part.name}.`);
+      await refresh();
+      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
+      return true;
+    } catch (error) {
+      setStatus(error.message);
+      return false;
+    } finally {
+      setSavingRack(false);
+    }
+  };
+
+  const deletePart = async (part) => {
+    const password = window.prompt(`Enter admin password to delete ${part.name}`);
+    if (password !== adminPassword) {
+      setStatus('Wrong password.');
+      return false;
+    }
+    if (!window.confirm(`Delete ${part.name} from inventory? This cannot be undone.`)) {
+      return false;
+    }
+    try {
+      await api(`/parts/${part.id}`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Password': password }
+      });
+      setStatus(`Deleted ${part.name}.`);
+      await refresh();
+      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
+      return true;
+    } catch (error) {
+      setStatus(error.message);
+      return false;
+    }
+  };
+
+  const updatePurchase = async (purchaseId, payload) => {
+    try {
+      const purchase = await api(`/purchases/${purchaseId}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      });
+      setStatus(`Updated dealer purchase ${purchase.dealerInvoiceNumber || purchase.id}.`);
+      await refresh();
+      return true;
+    } catch (error) {
+      setStatus(error.message);
+      return false;
+    }
+  };
+
+  const uploadInventoryPdf = async (file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const rows = await api('/inventory/upload-pdf', { method: 'POST', body: form });
+    if (!rows.length) {
+      setStatus('PDF uploaded, but no inventory rows were detected. This can happen with scanned PDFs or a new dealer layout.');
+    } else {
+      setStatus(`PDF uploaded. Found ${rows.length} row(s) for review.`);
+    }
+    return rows;
+  };
+
+  const saveInventoryImport = async (rows, allowOverride = false, purchaseInfo = {}) => {
+    const saved = await api('/inventory/save-import', {
+      method: 'POST',
+      body: JSON.stringify({ allowOverride, rows, ...purchaseInfo })
+    });
+    setStatus(purchaseInfo.recordPurchase
+      ? `Imported ${saved.length} inventory item(s) and saved dealer purchase record.`
+      : `Imported ${saved.length} inventory item(s) from PDF.`);
+    await refresh();
+    return saved;
+  };
+
+  const modelNames = [...new Set(models.map((model) => model.name))].sort();
+  const seriesOptions = models.filter((model) => model.name === selectedModelName);
+  const changeTab = (nextTab) => {
+    if (nextTab === 'inventory' || nextTab === 'history') {
+      setAdminUnlocked(false);
+    }
+    setTab(nextTab);
+  };
+
+  const tabs = [
+    ['billing', ShoppingCart, 'Billing'],
+    ['dashboard', ClipboardList, 'Dashboard'],
+    ['inventory', Boxes, 'Inventory'],
+    ['purchases', PackageCheck, 'Dealer Purchases'],
+    ['history', History, 'Bills'],
+    ['suppliers', Users, 'Suppliers']
+  ];
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <div className="flex min-h-screen">
+        <aside className="hidden w-72 border-r border-zinc-800 bg-zinc-950 px-4 py-5 lg:block">
+          <div className="mb-8 flex items-center gap-3 px-2">
+            <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-red-600 text-white">
+              <Store size={24} />
+            </div>
+            <div>
+              <div className="text-lg font-black">Mahalaxmi</div>
+              <div className="text-xs uppercase tracking-wide text-zinc-500">Auto Parts Web</div>
+            </div>
+          </div>
+          <nav className="space-y-2">
+            {tabs.map(([id, Icon, label]) => (
+              <button
+                key={id}
+                className={`btn w-full justify-start ${tab === id ? 'bg-red-600 text-white' : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'}`}
+                onClick={() => changeTab(id)}
+              >
+                <Icon size={18} /> {label}
+              </button>
+            ))}
+          </nav>
+        </aside>
+
+        <main className="flex-1 overflow-x-hidden">
+          <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/90 px-4 py-4 backdrop-blur md:px-8">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <h1 className="text-xl font-black md:text-2xl">Counter Operations</h1>
+                <p className="text-sm text-zinc-500">Brand/model lookup, rack visibility, GST billing, stock control.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn btn-secondary" onClick={() => refresh().catch((error) => setStatus(error.message))}>
+                  <RefreshCcw size={16} /> Refresh
+                </button>
+                <select className="field w-44" value={tab} onChange={(event) => changeTab(event.target.value)}>
+                  {tabs.map(([id,, label]) => <option key={id} value={id}>{label}</option>)}
+                </select>
+              </div>
+            </div>
+          </header>
+
+          {status && (
+            <div className="mx-4 mt-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 md:mx-8">
+              {status}
+            </div>
+          )}
+
+          <div className="p-4 md:p-8">
+            {tab === 'billing' && (
+              <BillingScreen
+                brands={brands}
+                models={models}
+                modelNames={modelNames}
+                seriesOptions={seriesOptions}
+                selectedBrand={selectedBrand}
+                selectedModelName={selectedModelName}
+                selectedSeries={selectedSeries}
+                setSelectedBrand={setSelectedBrand}
+                setSelectedModelName={setSelectedModelName}
+                setSelectedSeries={setSelectedSeries}
+                partSearch={partSearch}
+                setPartSearch={setPartSearch}
+                parts={filteredParts}
+                cart={cart}
+                customer={customer}
+                setCustomer={setCustomer}
+                totals={totals}
+                addToCart={addToCart}
+                updateCart={updateCart}
+                removeFromCart={(partId) => setCart((current) => current.filter((item) => item.partId !== partId))}
+                saveBill={saveBill}
+              />
+            )}
+            {tab === 'dashboard' && <Dashboard stats={stats} />}
+            {tab === 'inventory' && (
+              adminUnlocked ? (
+                <Inventory parts={allParts} brands={brands} catalogModels={catalogModels} updatePart={updatePart} deletePart={deletePart} savingRack={savingRack} createPart={createPart} createVehicleModel={createVehicleModel} uploadInventoryPdf={uploadInventoryPdf} saveInventoryImport={saveInventoryImport} />
+              ) : (
+                <AdminGate title="Inventory Locked" unlockAdmin={unlockAdmin} />
+              )
+            )}
+            {tab === 'purchases' && <Purchases suppliers={suppliers} parts={allParts} purchases={purchases} createPurchase={createPurchase} updatePurchase={updatePurchase} />}
+            {tab === 'history' && (
+              adminUnlocked ? <BillHistory bills={bills} cancelBill={cancelBill} /> : <AdminGate title="Bills Locked" unlockAdmin={unlockAdmin} />
+            )}
+            {tab === 'suppliers' && <Suppliers suppliers={suppliers} createSupplier={createSupplier} />}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function makeCartLine(part, quantity, discountAmount = 0) {
+  const numericQuantity = Number(quantity || 0);
+  const gross = Number(part.sellingPrice || 0) * numericQuantity;
+  const safeDiscount = Math.min(gross, Math.max(0, Number(discountAmount || 0)));
+  const lineTotal = round2(gross - safeDiscount);
+  const gstRate = Number(part.gstRate || 0);
+  const taxableValue = gstRate > 0 ? round2(lineTotal * 100 / (100 + gstRate)) : lineTotal;
+  const gstAmount = round2(lineTotal - taxableValue);
+  return {
+    partId: part.id,
+    partName: part.name,
+    partNumber: part.partNumber || '',
+    serialNo: part.serialNo || '',
+    hsnCode: part.hsnCode || '',
+    companyName: part.companyName || '',
+    compatibility: partCompatibility(part),
+    rackNumber: part.rackNumber,
+    stockLevel: part.stockLevel,
+    unitPrice: numericQuantity > 0 ? round2(lineTotal / numericQuantity) : 0,
+    gstRate,
+    quantity,
+    discountAmount: safeDiscount,
+    taxableValue,
+    gstAmount,
+    lineTotal
+  };
+}
+
+function round2(value) {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function cleanNumberInput(value) {
+  const cleaned = String(value ?? '').replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+  if (!cleaned) return '';
+  if (cleaned.includes('.')) {
+    const [whole, decimal] = cleaned.split('.');
+    return `${String(Number(whole || 0))}.${decimal}`;
+  }
+  return String(Number(cleaned));
+}
+
+function modelLabel(model) {
+  if (!model) return 'Unassigned';
+  return `${model.brandName} ${model.name} ${model.series || 'Standard'}`.trim();
+}
+
+function partCompatibility(part) {
+  const linked = (part.compatibleModels || []).map(modelLabel).join(', ');
+  return linked || part.carCompatibility || 'Universal';
+}
+
+function BillingScreen(props) {
+  const {
+    brands,
+    modelNames,
+    seriesOptions,
+    selectedBrand,
+    selectedModelName,
+    selectedSeries,
+    setSelectedBrand,
+    setSelectedModelName,
+    setSelectedSeries,
+    partSearch,
+    setPartSearch,
+    parts,
+    cart,
+    customer,
+    setCustomer,
+    totals,
+    addToCart,
+    updateCart,
+    removeFromCart,
+    saveBill
+  } = props;
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(parts.length / PAGE_SIZE));
+  const pagedParts = parts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [partSearch, selectedBrand, selectedModelName, selectedSeries]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  return (
+    <div className="grid gap-6 2xl:grid-cols-[1.55fr_1fr]">
+      <section className="panel p-4 md:p-5">
+        <div className="mb-5 grid gap-3 md:grid-cols-4">
+          <label className="space-y-1 md:col-span-4">
+            <span className="text-xs font-semibold uppercase text-zinc-500">Search inventory</span>
+            <div className="relative">
+              <Search className="absolute left-3 top-3 text-zinc-500" size={16} />
+              <input className="field pl-9" value={partSearch} onChange={(event) => setPartSearch(event.target.value)} placeholder="Type item name, serial no, part number, HSN, or rack" />
+            </div>
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-semibold uppercase text-zinc-500">Brand</span>
+            <select className="field" value={selectedBrand} onChange={(event) => setSelectedBrand(event.target.value)}>
+              <option value="">Select brand</option>
+              {brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-semibold uppercase text-zinc-500">Model</span>
+            <select
+              className="field"
+              value={selectedModelName}
+              onChange={(event) => {
+                setSelectedModelName(event.target.value);
+                setSelectedSeries('');
+              }}
+              disabled={!selectedBrand}
+            >
+              <option value="">Select model</option>
+              {modelNames.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-semibold uppercase text-zinc-500">Series</span>
+            <select className="field" value={selectedSeries} onChange={(event) => setSelectedSeries(event.target.value)} disabled={!selectedModelName}>
+              <option value="">Select series</option>
+              {seriesOptions.map((model) => <option key={model.id} value={model.id}>{model.series || 'Standard'}</option>)}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-xs font-semibold uppercase text-zinc-500">Search parts</span>
+            <div className="relative">
+              <Search className="absolute left-3 top-3 text-zinc-500" size={16} />
+              <input className="field pl-9" value={partSearch} onChange={(event) => setPartSearch(event.target.value)} placeholder="Name, serial no, SKU, HSN, rack" />
+            </div>
+          </label>
+        </div>
+
+        <div className="overflow-hidden rounded-lg border border-zinc-800">
+          <table className="w-full min-w-[900px] text-left text-sm">
+            <thead className="bg-zinc-900 text-xs uppercase text-zinc-500">
+              <tr>
+                <th className="px-3 py-3">Part</th>
+                <th className="px-3 py-3">Part No.</th>
+                <th className="px-3 py-3">Serial No.</th>
+                <th className="px-3 py-3">HSN</th>
+                <th className="px-3 py-3">Rack</th>
+                <th className="px-3 py-3 text-right">Stock</th>
+                <th className="px-3 py-3 text-right">Rate</th>
+                <th className="px-3 py-3 text-right">GST</th>
+                <th className="px-3 py-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-800">
+              {pagedParts.map((part) => (
+                <tr key={part.id} className="bg-zinc-950/70">
+                  <td className="px-3 py-3">
+                    <div className="font-semibold text-zinc-100">{part.name}</div>
+                    {part.companyName && <div className="text-xs text-zinc-400">{part.companyName}</div>}
+                    <div className="text-xs text-zinc-500">{partCompatibility(part)}</div>
+                  </td>
+                  <td className="px-3 py-3 text-zinc-300">{part.partNumber || '-'}</td>
+                  <td className="px-3 py-3 text-zinc-300">{part.serialNo || '-'}</td>
+                  <td className="px-3 py-3 text-zinc-300">{part.hsnCode || '-'}</td>
+                  <td className="px-3 py-3 text-zinc-300">{part.rackNumber || part.warehouseLocation}</td>
+                  <td className="px-3 py-3 text-right">
+                    <span className={part.stockLevel < 5 ? 'text-amber-300' : 'text-emerald-300'}>{part.stockLevel}</span>
+                  </td>
+                  <td className="px-3 py-3 text-right">{money(part.sellingPrice)}</td>
+                  <td className="px-3 py-3 text-right">{part.gstRate}%</td>
+                  <td className="px-3 py-3 text-right">
+                    <button className="btn btn-primary" onClick={() => addToCart(part)} disabled={part.stockLevel < 1}>
+                      <ShoppingCart size={15} /> Add
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!parts.length && (
+                <tr>
+                  <td colSpan="9" className="px-4 py-16 text-center text-zinc-500">
+                    Search inventory or select a vehicle filter to add items.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <Pagination page={page} totalItems={parts.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+      </section>
+
+      <section className="panel p-4 md:p-5">
+        <div className="mb-4 flex items-center gap-2">
+          <ReceiptText className="text-red-400" size={20} />
+          <h2 className="text-lg font-black">{customer.invoiceType === 'GST' ? 'GST Bill' : 'Normal Bill'}</h2>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          <select className="field" value={customer.invoiceType} onChange={(event) => setCustomer({ ...customer, invoiceType: event.target.value, customerGstin: event.target.value === 'NORMAL' ? '' : customer.customerGstin })}>
+            <option value="NORMAL">Normal Bill</option>
+            <option value="GST">GST Bill</option>
+          </select>
+          <input className="field" type="date" value={customer.billingDate} onChange={(event) => setCustomer({ ...customer, billingDate: event.target.value })} />
+          <input className="field" value={customer.customerName} onChange={(event) => setCustomer({ ...customer, customerName: event.target.value })} placeholder="Customer name" />
+          <input className="field" value={customer.customerMobile} onChange={(event) => setCustomer({ ...customer, customerMobile: event.target.value })} placeholder="Customer mobile" />
+          {customer.invoiceType === 'GST' && <input className="field" value={customer.customerGstin} onChange={(event) => setCustomer({ ...customer, customerGstin: event.target.value.toUpperCase() })} placeholder="Customer GSTIN (optional)" />}
+          {customer.invoiceType === 'GST' && (
+            <select className="field" value={customer.supplyType} onChange={(event) => setCustomer({ ...customer, supplyType: event.target.value })}>
+              <option value="INTRA_STATE">CGST + SGST</option>
+              <option value="INTER_STATE">IGST</option>
+            </select>
+          )}
+          <select className="field" value={customer.paymentMode} onChange={(event) => setCustomer({ ...customer, paymentMode: event.target.value })}>
+            <option value="CASH">Cash</option>
+            <option value="UPI">UPI</option>
+            <option value="CARD">Card</option>
+            <option value="CREDIT">Credit</option>
+          </select>
+          {customer.invoiceType === 'GST' && <textarea className="field h-20 md:col-span-2" value={customer.customerAddress} onChange={(event) => setCustomer({ ...customer, customerAddress: event.target.value })} placeholder="Customer address" />}
+        </div>
+
+        <div className="mt-5 space-y-3">
+          {cart.map((item) => (
+            <div key={item.partId} className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3">
+              <div className="mb-3 flex items-start justify-between gap-3">
+                <div>
+                  <div className="font-semibold">{item.partName}</div>
+                  {item.companyName && <div className="text-xs text-zinc-400">{item.companyName}</div>}
+                  <div className="text-xs text-zinc-500">
+                    {item.partNumber ? `Part No. ${item.partNumber} / ` : ''}{item.serialNo ? `Serial No. ${item.serialNo} / ` : ''}{item.hsnCode ? `HSN ${item.hsnCode} / ` : ''}Rack {item.rackNumber || 'No rack'} / {item.compatibility}
+                  </div>
+                </div>
+                <button className="text-zinc-500 hover:text-red-300" onClick={() => removeFromCart(item.partId)} aria-label="Remove item">
+                  <Trash2 size={17} />
+                </button>
+              </div>
+              <div className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
+                <label className="space-y-1">
+                  <span className="text-[10px] font-semibold uppercase text-zinc-500">Qty</span>
+                  <input className="field" inputMode="numeric" value={item.quantity} onChange={(event) => updateCart(item.partId, { quantity: event.target.value })} />
+                </label>
+                <label className="space-y-1">
+                  <span className="text-[10px] font-semibold uppercase text-zinc-500">Discount</span>
+                  <input className="field" inputMode="decimal" value={item.discountAmount || ''} onChange={(event) => updateCart(item.partId, { discountAmount: event.target.value })} placeholder="Rs off" />
+                </label>
+                <div className="min-w-28 text-right">
+                  <div className="text-[10px] font-semibold uppercase text-zinc-500">Rate</div>
+                  <div className="text-sm font-bold">{money(item.lineTotal)}</div>
+                </div>
+              </div>
+            </div>
+          ))}
+          {!cart.length && <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-zinc-500">Add compatible parts to prepare the bill.</div>}
+        </div>
+
+        <div className="mt-5 space-y-2 border-t border-zinc-800 pt-4 text-sm">
+          <Total label={customer.invoiceType === 'GST' ? 'Taxable' : 'Subtotal'} value={totals.subtotal} />
+          {customer.invoiceType === 'GST' && customer.supplyType === 'INTRA_STATE' && <Total label="CGST 9%" value={totals.cgst} />}
+          {customer.invoiceType === 'GST' && customer.supplyType === 'INTRA_STATE' && <Total label="SGST 9%" value={totals.sgst} />}
+          {customer.invoiceType === 'GST' && <Total label="IGST" value={totals.igst} />}
+          <div className="flex items-center justify-between pt-2 text-lg font-black">
+            <span>Grand Total</span>
+            <span>{money(totals.grandTotal)}</span>
+          </div>
+        </div>
+        <button className="btn btn-primary mt-5 w-full" onClick={saveBill}>
+          <Save size={17} /> Save Bill + Deduct Stock
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function Total({ label, value }) {
+  return (
+    <div className="flex justify-between text-zinc-300">
+      <span>{label}</span>
+      <strong>{money(value)}</strong>
+    </div>
+  );
+}
+
+function Pagination({ page, totalItems, pageSize, onPageChange }) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const start = totalItems ? ((page - 1) * pageSize) + 1 : 0;
+  const end = Math.min(totalItems, page * pageSize);
+
+  return (
+    <div className="mt-4 flex flex-col gap-3 border-t border-zinc-800 pt-4 text-sm text-zinc-400 md:flex-row md:items-center md:justify-between">
+      <span>{start}-{end} of {totalItems}</span>
+      <div className="flex items-center gap-2">
+        <button className="btn btn-secondary" type="button" onClick={() => onPageChange(Math.max(1, page - 1))} disabled={page <= 1}>Previous</button>
+        <span className="min-w-24 text-center text-zinc-300">Page {page} / {totalPages}</span>
+        <button className="btn btn-secondary" type="button" onClick={() => onPageChange(Math.min(totalPages, page + 1))} disabled={page >= totalPages}>Next</button>
+      </div>
+    </div>
+  );
+}
+
+function AdminGate({ title, unlockAdmin }) {
+  const [password, setPassword] = useState('');
+
+  const submit = (event) => {
+    event.preventDefault();
+    if (unlockAdmin(password)) {
+      setPassword('');
+    }
+  };
+
+  return (
+    <section className="panel mx-auto max-w-md p-5">
+      <h2 className="text-lg font-black">{title}</h2>
+      <p className="mt-1 text-sm text-zinc-500">Enter admin password to continue.</p>
+      <form className="mt-4 space-y-3" onSubmit={submit}>
+        <input className="field" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" autoFocus />
+        <button className="btn btn-primary w-full" type="submit">Unlock</button>
+      </form>
+    </section>
+  );
+}
+
+function Dashboard({ stats }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const thisMonth = today.slice(0, 7);
+  const [reportMode, setReportMode] = useState('DAY');
+  const [reportDate, setReportDate] = useState(today);
+  const [reportMonth, setReportMonth] = useState(thisMonth);
+  const [report, setReport] = useState(null);
+  const [reportError, setReportError] = useState('');
+
+  useEffect(() => {
+    const query = reportMode === 'MONTH'
+      ? `mode=MONTH&month=${reportMonth}`
+      : `mode=DAY&date=${reportDate}`;
+    api(`/reports/profit?${query}`)
+      .then((data) => {
+        setReport(data);
+        setReportError('');
+      })
+      .catch((error) => {
+        setReport(null);
+        setReportError(error.message);
+      });
+  }, [reportMode, reportDate, reportMonth]);
+
+  const downloadSales = () => {
+    window.open(`${API_BASE}/reports/sales.csv?date=${reportDate}`, '_blank');
+  };
+
+  if (!stats) return <div className="text-zinc-500">Loading dashboard...</div>;
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-4 md:grid-cols-4">
+        <Stat icon={Boxes} label="Active Inventory" value={stats.inventory.active} tone="text-cyan-300" />
+        <Stat icon={AlertTriangle} label="Low Stock" value={stats.inventory.lowStock} tone="text-amber-300" />
+        <Stat icon={IndianRupee} label="Gross Profit" value={money(stats.grossProfit)} tone={Number(stats.grossProfit || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'} />
+        <Stat icon={ReceiptText} label="Today Bills" value={stats.todayBills} tone="text-red-300" />
+      </div>
+      <div className="grid gap-4 md:grid-cols-3">
+        <Stat icon={IndianRupee} label="Sales Revenue" value={money(stats.totalRevenue)} tone="text-emerald-300" />
+        <Stat icon={PackageCheck} label="Dealer Purchases" value={money(stats.totalPurchases)} tone="text-cyan-300" />
+        <Stat icon={Boxes} label="Inventory Value" value={money(stats.inventoryValue)} tone="text-zinc-200" />
+      </div>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <SimpleList title="Recent Bills" items={stats.recentBills.map((bill) => `${bill.billNumber} / ${bill.customer} / ${money(bill.amount)}`)} />
+        <SimpleList title="Top Selling Parts" items={stats.topSelling.map((part) => `${part.name} / ${part.partNumber} / ${part.sold} units`)} />
+      </div>
+      <section className="panel p-4">
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h2 className="text-lg font-black">Profit / Loss History</h2>
+            <p className="text-sm text-zinc-500">Check sales, purchase cost, and profit for any day or month.</p>
+          </div>
+          <div className="grid gap-2 md:grid-cols-[160px_180px_180px_auto]">
+            <select className="field" value={reportMode} onChange={(event) => setReportMode(event.target.value)}>
+              <option value="DAY">Per Day</option>
+              <option value="MONTH">Per Month</option>
+            </select>
+            <input className="field" type="date" value={reportDate} onChange={(event) => setReportDate(event.target.value)} />
+            <input className="field" type="month" value={reportMonth} onChange={(event) => setReportMonth(event.target.value)} />
+            <button className="btn btn-secondary" onClick={downloadSales}>
+              <ClipboardList size={16} /> Download Day Sales
+            </button>
+          </div>
+        </div>
+        {reportError && <div className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{reportError}</div>}
+        {report && (
+          <>
+            <div className="mb-4 grid gap-3 md:grid-cols-4">
+              <Stat icon={ReceiptText} label="Bills" value={report.billCount} tone="text-cyan-300" />
+              <Stat icon={Boxes} label="Parts Sold" value={report.quantitySold} tone="text-zinc-200" />
+              <Stat icon={IndianRupee} label="Sales" value={money(report.salesTotal)} tone="text-emerald-300" />
+              <Stat icon={IndianRupee} label="Profit / Loss" value={money(report.profitLoss)} tone={Number(report.profitLoss || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'} />
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-zinc-800">
+              <table className="w-full min-w-[1250px] text-left text-sm">
+                <thead className="bg-zinc-900 text-xs uppercase text-zinc-500">
+                  <tr>
+                    <th className="px-3 py-3">Date</th>
+                    <th>Bill</th>
+                    <th>Customer</th>
+                    <th>Part</th>
+                    <th>Qty</th>
+                    <th>Selling</th>
+                    <th>Total</th>
+                    <th>Purchase</th>
+                    <th>Profit / Loss</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800">
+                  {report.sales.map((sale, index) => (
+                    <tr key={`${sale.billNumber}-${sale.partNumber}-${index}`}>
+                      <td className="px-3 py-3">{sale.billingDate}</td>
+                      <td>{sale.billNumber}</td>
+                      <td>
+                        <div className="font-semibold">{sale.customerName}</div>
+                        <div className="text-xs text-zinc-500">{sale.customerMobile || ''}</div>
+                      </td>
+                      <td>
+                        <div className="font-semibold">{sale.partName}</div>
+                        <div className="text-xs text-zinc-500">{sale.companyName || ''} {sale.partNumber || ''}</div>
+                      </td>
+                      <td>{sale.quantity}</td>
+                      <td>{money(sale.unitSellingPrice)}</td>
+                      <td>{money(sale.lineTotal)}</td>
+                      <td>{money(sale.purchaseTotal)}</td>
+                      <td className={Number(sale.profitLoss || 0) >= 0 ? 'font-bold text-emerald-300' : 'font-bold text-red-300'}>{money(sale.profitLoss)}</td>
+                    </tr>
+                  ))}
+                  {!report.sales.length && (
+                    <tr>
+                      <td colSpan="9" className="px-4 py-10 text-center text-zinc-500">No sales found for this selection.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function Stat({ icon: Icon, label, value, tone }) {
+  return (
+    <div className="stat">
+      <Icon className={tone} size={23} />
+      <div className="mt-4 text-xs font-semibold uppercase text-zinc-500">{label}</div>
+      <div className="mt-1 text-2xl font-black">{value}</div>
+    </div>
+  );
+}
+
+function SimpleList({ title, items }) {
+  return (
+    <section className="panel p-4">
+      <h2 className="mb-4 text-lg font-black">{title}</h2>
+      <div className="space-y-2">
+        {items.length ? items.map((item) => <div key={item} className="rounded-md bg-zinc-900 px-3 py-2 text-sm text-zinc-300">{item}</div>) : <div className="text-sm text-zinc-500">No data yet.</div>}
+      </div>
+    </section>
+  );
+}
+
+function Inventory({ parts, brands, catalogModels, updatePart, deletePart, savingRack, createPart, createVehicleModel, uploadInventoryPdf, saveInventoryImport }) {
+  const [stockDrafts, setStockDrafts] = useState({});
+  const [rackDrafts, setRackDrafts] = useState({});
+  const [purchaseDrafts, setPurchaseDrafts] = useState({});
+  const [purchaseModes, setPurchaseModes] = useState({});
+  const [sellingDrafts, setSellingDrafts] = useState({});
+  const [nameDrafts, setNameDrafts] = useState({});
+  const [partNumberDrafts, setPartNumberDrafts] = useState({});
+  const [serialDrafts, setSerialDrafts] = useState({});
+  const [hsnDrafts, setHsnDrafts] = useState({});
+  const [companyDrafts, setCompanyDrafts] = useState({});
+  const [compatibilityDrafts, setCompatibilityDrafts] = useState({});
+  const [compatibilityOpen, setCompatibilityOpen] = useState({});
+  const [editingParts, setEditingParts] = useState({});
+  const [search, setSearch] = useState('');
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [importRows, setImportRows] = useState([]);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState('');
+  const [importPurchase, setImportPurchase] = useState({
+    recordPurchase: true,
+    supplierName: '',
+    dealerInvoiceNumber: '',
+    purchaseDate: new Date().toISOString().slice(0, 10),
+    notes: ''
+  });
+  const [page, setPage] = useState(1);
+  const visible = parts.filter((part) => `${part.name} ${part.companyName || ''} ${part.partNumber || ''} ${part.serialNo || ''} ${part.hsnCode || ''} ${part.rackNumber || ''} ${part.sellingPrice || ''} ${part.costPrice || ''}`.toLowerCase().includes(search.toLowerCase()));
+  const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  const pagedVisible = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  const updateImportRow = (index, field, value) => {
+    setImportRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row));
+  };
+
+  const uploadPdf = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    setImportMessage('');
+    try {
+      const rows = await uploadInventoryPdf(file);
+      setImportRows(withPreviewIds(rows));
+      if (!rows.length) {
+        setImportMessage('No rows were detected in this PDF. Try another dealer PDF or add missing rows manually below.');
+      }
+    } catch (error) {
+      setImportMessage(error.message);
+    } finally {
+      setImporting(false);
+      event.target.value = '';
+    }
+  };
+
+  const saveRows = async () => {
+    const rows = importRows.map((row) => {
+      const { _previewId, ...payload } = row;
+      return {
+        ...payload,
+        serialNo: '',
+        hsnCode: row.hsnCode || '',
+        purchasePrice: calculatedPurchasePrice(row),
+        purchaseDiscount: row.purchaseMode === 'PERCENT' ? Number(row.purchasePercent || 0) : 0,
+        quantity: Number(row.quantity || 0),
+        sellingPrice: Number(row.sellingPrice || 0),
+        totalAmount: Number(row.totalAmount || 0)
+      };
+    });
+    await saveInventoryImport(rows, true, importPurchase);
+    setImportRows([]);
+  };
+
+  const currentCompatibilityIds = (part) => (part.compatibleModels || []).map((model) => String(model.id));
+
+  const draftCompatibilityIds = (part) => compatibilityDrafts[part.id] ?? currentCompatibilityIds(part);
+
+  const setCompatibilitySelection = (part, selectedOptions) => {
+    const selected = Array.from(selectedOptions).map((option) => option.value);
+    setCompatibilityDrafts({ ...compatibilityDrafts, [part.id]: selected });
+  };
+
+  const purchaseModeFor = (part) => purchaseModes[part.id] || 'DIRECT';
+
+  const purchaseInputFor = (part) => purchaseDrafts[part.id] ?? part.costPrice ?? 0;
+
+  const calculatedInventoryPurchasePrice = (part) => {
+    const input = Number(purchaseInputFor(part) || 0);
+    if (purchaseModeFor(part) === 'PERCENT') {
+      const percent = Math.min(100, Math.max(0, input));
+      return round2(Number(part.sellingPrice || 0) * (1 - percent / 100));
+    }
+    return round2(input);
+  };
+
+  const startEditingPart = (part) => {
+    setEditingParts({ ...editingParts, [part.id]: true });
+    setNameDrafts({ ...nameDrafts, [part.id]: part.name || '' });
+    setPartNumberDrafts({ ...partNumberDrafts, [part.id]: part.partNumber || '' });
+    setSerialDrafts({ ...serialDrafts, [part.id]: part.serialNo || '' });
+    setHsnDrafts({ ...hsnDrafts, [part.id]: part.hsnCode || '' });
+    setCompanyDrafts({ ...companyDrafts, [part.id]: part.companyName || '' });
+    setRackDrafts({ ...rackDrafts, [part.id]: part.rackNumber || '' });
+    setStockDrafts({ ...stockDrafts, [part.id]: part.stockLevel ?? 0 });
+    setPurchaseDrafts({ ...purchaseDrafts, [part.id]: part.costPrice ?? 0 });
+    setSellingDrafts({ ...sellingDrafts, [part.id]: part.sellingPrice ?? 0 });
+  };
+
+  const saveInventoryPart = async (part) => {
+    const modelIds = draftCompatibilityIds(part);
+    await updatePart(part, {
+      name: nameDrafts[part.id] ?? part.name ?? '',
+      partNumber: partNumberDrafts[part.id] ?? part.partNumber ?? '',
+      serialNo: serialDrafts[part.id] ?? part.serialNo ?? '',
+      hsnCode: hsnDrafts[part.id] ?? part.hsnCode ?? '',
+      rackNumber: rackDrafts[part.id] ?? part.rackNumber ?? '',
+      companyName: companyDrafts[part.id] ?? part.companyName ?? '',
+      stockLevel: stockDrafts[part.id] ?? part.stockLevel,
+      costPrice: calculatedInventoryPurchasePrice(part),
+      sellingPrice: Number(sellingDrafts[part.id] ?? part.sellingPrice ?? 0),
+      purchaseDiscount: purchaseModeFor(part) === 'PERCENT' ? Number(purchaseInputFor(part) || 0) : 0,
+      modelIds: modelIds.map(Number),
+      carCompatibility: modelIds.length ? 'Linked vehicle models' : 'Universal'
+    });
+    setCompatibilityOpen({ ...compatibilityOpen, [part.id]: false });
+    setEditingParts({ ...editingParts, [part.id]: false });
+  };
+
+  return (
+    <section className="space-y-5">
+      <div className="panel p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-lg font-black">Import Inventory from PDF</h2>
+            <p className="text-sm text-zinc-500">Upload a dealer invoice, review every row, then save confirmed stock.</p>
+          </div>
+          <label className="btn btn-secondary cursor-pointer">
+            <Upload size={16} /> {importing ? 'Reading PDF...' : 'Upload PDF'}
+            <input className="hidden" type="file" accept="application/pdf" onChange={uploadPdf} disabled={importing} />
+          </label>
+        </div>
+        {importMessage && <div className="mt-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{importMessage}</div>}
+
+        {(!!importRows.length || importMessage) && (
+          <div className="mt-5 overflow-hidden rounded-lg border border-zinc-800">
+            <div className="grid gap-3 border-b border-zinc-800 bg-zinc-950/70 p-3 md:grid-cols-[160px_1fr_1fr_170px_1fr]">
+              <label className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+                <input
+                  type="checkbox"
+                  checked={importPurchase.recordPurchase}
+                  onChange={(event) => setImportPurchase((current) => ({ ...current, recordPurchase: event.target.checked }))}
+                />
+                Record Purchase
+              </label>
+              <input
+                className="field"
+                value={importPurchase.supplierName}
+                onChange={(event) => setImportPurchase((current) => ({ ...current, supplierName: event.target.value }))}
+                placeholder="Dealer / supplier name"
+              />
+              <input
+                className="field"
+                value={importPurchase.dealerInvoiceNumber}
+                onChange={(event) => setImportPurchase((current) => ({ ...current, dealerInvoiceNumber: event.target.value }))}
+                placeholder="Dealer invoice number"
+              />
+              <input
+                className="field"
+                type="date"
+                value={importPurchase.purchaseDate}
+                onChange={(event) => setImportPurchase((current) => ({ ...current, purchaseDate: event.target.value }))}
+              />
+              <input
+                className="field"
+                value={importPurchase.notes}
+                onChange={(event) => setImportPurchase((current) => ({ ...current, notes: event.target.value }))}
+                placeholder="Notes"
+              />
+            </div>
+            <table className="w-full min-w-[1320px] text-left text-sm">
+              <thead className="bg-zinc-900 text-xs uppercase text-zinc-500">
+                <tr>
+                  <th>Part No.</th>
+                  <th>HSN</th>
+                  <th>Rack No. (optional)</th>
+                  <th className="px-3 py-3">Item Name</th>
+                  <th>Qty</th>
+                  <th>Selling Price</th>
+                  <th>Purchase Mode</th>
+                  <th>Purchase Input</th>
+                  <th>Actual Purchase</th>
+                  <th>Total</th>
+                  <th className="px-3 text-right">Edit</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800">
+                {importRows.map((row, index) => (
+                  <tr key={row._previewId || index}>
+                    <td className="w-40">
+                      <input className="field" value={row.partNumber || ''} onChange={(event) => updateImportRow(index, 'partNumber', event.target.value.toUpperCase())} />
+                    </td>
+                    <td className="w-32">
+                      <input className="field" value={row.hsnCode || ''} onChange={(event) => updateImportRow(index, 'hsnCode', event.target.value)} placeholder="Optional" />
+                    </td>
+                    <td className="w-36">
+                      <input className="field" value={row.rackNumber || ''} onChange={(event) => updateImportRow(index, 'rackNumber', event.target.value.toUpperCase())} placeholder="Add later" />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input className="field" value={row.itemName || ''} onChange={(event) => updateImportRow(index, 'itemName', event.target.value)} />
+                    </td>
+                    <td className="w-24"><input className="field" type="number" min="0" value={row.quantity} onChange={(event) => updateImportRow(index, 'quantity', event.target.value)} /></td>
+                    <td className="w-36"><input className="field" type="number" min="0" step="0.01" value={row.sellingPrice} onChange={(event) => updateImportRow(index, 'sellingPrice', event.target.value)} /></td>
+                    <td className="w-40">
+                      <select className="field" value={row.purchaseMode || 'DIRECT'} onChange={(event) => updateImportRow(index, 'purchaseMode', event.target.value)}>
+                        <option value="DIRECT">Direct Price</option>
+                        <option value="PERCENT">Percentage</option>
+                      </select>
+                    </td>
+                    <td className="w-36">
+                      {row.purchaseMode === 'PERCENT' ? (
+                        <input className="field" type="number" min="0" max="100" step="0.01" value={row.purchasePercent || ''} onChange={(event) => updateImportRow(index, 'purchasePercent', event.target.value)} placeholder="10%" />
+                      ) : (
+                        <input className="field" type="number" min="0" step="0.01" value={row.purchasePrice || ''} onChange={(event) => updateImportRow(index, 'purchasePrice', event.target.value)} placeholder="Price" />
+                      )}
+                    </td>
+                    <td className="w-36 font-semibold text-emerald-300">{money(calculatedPurchasePrice(row))}</td>
+                    <td className="w-32 text-zinc-300">{money(row.totalAmount)}</td>
+                    <td className="px-3 text-right">
+                      <button className="text-zinc-500 hover:text-red-300" onClick={() => setImportRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}>
+                        <Trash2 size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="flex flex-col gap-3 border-t border-zinc-800 bg-zinc-900/50 p-3 md:flex-row md:justify-between">
+              <button className="btn btn-secondary" onClick={() => setImportRows((rows) => [...rows, ...withPreviewIds([{ serialNo: '', itemName: '', partNumber: '', hsnCode: '', rackNumber: '', quantity: 1, sellingPrice: 0, purchaseMode: 'DIRECT', purchasePrice: 0, purchasePercent: '', purchaseDiscount: 0, totalAmount: 0, duplicate: false, sourceLine: '' }])])}>Add Missing Row</button>
+              <button className="btn btn-primary" onClick={saveRows}><Save size={16} /> Save Inventory</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <VehicleModelForm brands={brands} createVehicleModel={createVehicleModel} />
+
+      <div className="panel p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="text-lg font-black">Inventory</h2>
+            <p className="text-sm text-zinc-500">Add new parts, set rack, purchase price, selling price, GST, and vehicle fitment.</p>
+          </div>
+          <div className="flex flex-col gap-2 md:flex-row md:items-center">
+            <button className="btn btn-primary" onClick={() => setShowAddForm((current) => !current)}>
+              <PackageCheck size={16} /> {showAddForm ? 'Close Add Item' : 'Add Item Manually'}
+            </button>
+          </div>
+        </div>
+        {showAddForm && (
+          <ManualPartForm
+            brands={brands}
+            onCreatePart={async (payload) => {
+              const ok = await createPart(payload);
+              if (ok) setShowAddForm(false);
+              return ok;
+            }}
+          />
+        )}
+      </div>
+
+      <div className="panel p-4">
+      <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <h2 className="text-lg font-black">Current Stock</h2>
+        <input className="field md:w-80" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search inventory" />
+      </div>
+      <div className="overflow-x-auto rounded-lg border border-zinc-800">
+        <table className="w-full min-w-[1820px] border-separate border-spacing-0 text-left text-sm">
+          <thead className="bg-zinc-900 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="px-4 py-3">Part</th>
+              <th className="px-4 py-3">Company</th>
+              <th className="px-4 py-3">Serial No.</th>
+              <th className="px-4 py-3">HSN</th>
+              <th className="px-4 py-3">Compatibility</th>
+              <th className="px-4 py-3">Rack No.</th>
+              <th className="px-4 py-3">Purchase</th>
+              <th className="px-4 py-3 text-right">Selling</th>
+              <th className="px-4 py-3 text-right">Stock</th>
+              <th className="px-4 py-3 text-right">Save</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800">
+            {pagedVisible.map((part) => {
+              const isEditing = !!editingParts[part.id];
+              return (
+              <tr key={part.id}>
+                <td className="w-80 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <input
+                        className="field"
+                        value={nameDrafts[part.id] ?? part.name ?? ''}
+                        onChange={(event) => setNameDrafts({ ...nameDrafts, [part.id]: event.target.value })}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            saveInventoryPart(part);
+                          }
+                        }}
+                        placeholder="Part name"
+                      />
+                      <input
+                        className="field"
+                        value={partNumberDrafts[part.id] ?? part.partNumber ?? ''}
+                        onChange={(event) => setPartNumberDrafts({ ...partNumberDrafts, [part.id]: event.target.value.toUpperCase() })}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            saveInventoryPart(part);
+                          }
+                        }}
+                        placeholder="Part number"
+                      />
+                    </div>
+                  ) : (
+                    <div>
+                      <strong>{part.name}</strong>
+                      <div className="text-xs text-zinc-500">{part.partNumber || 'No part number'}</div>
+                    </div>
+                  )}
+                </td>
+                <td className="w-48 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <input
+                      className="field"
+                      value={companyDrafts[part.id] ?? part.companyName ?? ''}
+                      onChange={(event) => setCompanyDrafts({ ...companyDrafts, [part.id]: event.target.value })}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          saveInventoryPart(part);
+                        }
+                      }}
+                      placeholder="Company / brand"
+                    />
+                  ) : (
+                    <span className="text-zinc-300">{part.companyName || '-'}</span>
+                  )}
+                </td>
+                <td className="w-40 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <input
+                      className="field"
+                      value={serialDrafts[part.id] ?? part.serialNo ?? ''}
+                      onChange={(event) => setSerialDrafts({ ...serialDrafts, [part.id]: event.target.value })}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          saveInventoryPart(part);
+                        }
+                      }}
+                      placeholder="Serial no."
+                    />
+                  ) : (
+                    <span className="text-zinc-300">{part.serialNo || '-'}</span>
+                  )}
+                </td>
+                <td className="w-36 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <input
+                      className="field"
+                      value={hsnDrafts[part.id] ?? part.hsnCode ?? ''}
+                      onChange={(event) => setHsnDrafts({ ...hsnDrafts, [part.id]: event.target.value })}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          saveInventoryPart(part);
+                        }
+                      }}
+                      placeholder="HSN"
+                    />
+                  ) : (
+                    <span className="text-zinc-300">{part.hsnCode || '-'}</span>
+                  )}
+                </td>
+                <td className="w-[470px] px-4 py-3 align-top">
+                  <div className="mb-2 flex items-start gap-2">
+                    <div className="flex flex-1 flex-wrap gap-1">
+                      {(part.compatibleModels || []).length ? part.compatibleModels.map((model) => (
+                        <span key={model.id} className="rounded bg-zinc-800 px-2 py-1 text-xs text-zinc-200">{modelLabel(model)}</span>
+                      )) : <span className="text-xs text-zinc-500">{part.carCompatibility || 'Universal'}</span>}
+                    </div>
+                    <button
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-700 bg-zinc-900 text-sm font-bold text-zinc-100 hover:border-red-500 hover:text-red-300"
+                      type="button"
+                      onClick={() => setCompatibilityOpen({ ...compatibilityOpen, [part.id]: !compatibilityOpen[part.id] })}
+                      title="Edit compatibility"
+                    >
+                      +
+                    </button>
+                  </div>
+                  {compatibilityOpen[part.id] && (
+                    <select
+                      className="field min-h-32"
+                      multiple
+                      value={draftCompatibilityIds(part)}
+                      onChange={(event) => setCompatibilitySelection(part, event.target.selectedOptions)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          saveInventoryPart(part);
+                        }
+                      }}
+                    >
+                      {catalogModels.map((model) => <option key={model.id} value={String(model.id)}>{modelLabel(model)}</option>)}
+                    </select>
+                  )}
+                </td>
+                <td className="w-36 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <input className="field" value={rackDrafts[part.id] ?? part.rackNumber ?? ''} onChange={(event) => setRackDrafts({ ...rackDrafts, [part.id]: event.target.value.toUpperCase() })} placeholder="Rack" />
+                  ) : (
+                    <span className="text-zinc-300">{part.rackNumber || '-'}</span>
+                  )}
+                </td>
+                <td className="w-80 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <div className="grid grid-cols-[130px_1fr] gap-2">
+                      <select
+                        className="field"
+                        value={purchaseModeFor(part)}
+                        onChange={(event) => {
+                          setPurchaseModes({ ...purchaseModes, [part.id]: event.target.value });
+                          setPurchaseDrafts({ ...purchaseDrafts, [part.id]: event.target.value === 'PERCENT' ? (part.purchaseDiscount || '') : (part.costPrice || 0) });
+                        }}
+                      >
+                        <option value="DIRECT">Price</option>
+                        <option value="PERCENT">Discount %</option>
+                      </select>
+                      <input
+                        className="field"
+                        inputMode="decimal"
+                        value={purchaseInputFor(part)}
+                        onChange={(event) => setPurchaseDrafts({ ...purchaseDrafts, [part.id]: cleanNumberInput(event.target.value) })}
+                        placeholder={purchaseModeFor(part) === 'PERCENT' ? '10%' : 'Purchase price'}
+                      />
+                    </div>
+                  ) : (
+                    <span className="text-zinc-300">{money(part.costPrice)}</span>
+                  )}
+                </td>
+                <td className="w-36 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <input
+                      className="field text-right"
+                      inputMode="decimal"
+                      value={sellingDrafts[part.id] ?? part.sellingPrice ?? 0}
+                      onChange={(event) => setSellingDrafts({ ...sellingDrafts, [part.id]: cleanNumberInput(event.target.value) })}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          saveInventoryPart(part);
+                        }
+                      }}
+                      placeholder="Selling price"
+                    />
+                  ) : (
+                    <span className="block text-right text-zinc-300 whitespace-nowrap">{money(part.sellingPrice)}</span>
+                  )}
+                </td>
+                <td className="w-32 px-4 py-3 align-top">
+                  {isEditing ? (
+                    <input className="field" type="number" min="0" value={stockDrafts[part.id] ?? part.stockLevel} onChange={(event) => setStockDrafts({ ...stockDrafts, [part.id]: event.target.value })} />
+                  ) : (
+                    <span className="block text-right text-zinc-300">{part.stockLevel}</span>
+                  )}
+                </td>
+                <td className="w-28 px-4 py-3 text-right align-top">
+                  <div className="flex justify-end gap-2">
+                    {isEditing ? (
+                      <button className="btn btn-secondary" disabled={savingRack} onClick={async () => {
+                        await saveInventoryPart(part);
+                      }} title="Save item"><PackageCheck size={16} /></button>
+                    ) : (
+                      <button className="btn btn-secondary" disabled={savingRack} onClick={() => startEditingPart(part)} title="Edit item"><Pencil size={16} /></button>
+                    )}
+                    <button className="btn btn-danger" disabled={savingRack} onClick={() => deletePart(part)} title="Delete item"><Trash2 size={16} /></button>
+                  </div>
+                </td>
+              </tr>
+            );})}
+          </tbody>
+        </table>
+      </div>
+      <Pagination page={page} totalItems={visible.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+      </div>
+    </section>
+  );
+}
+
+function VehicleModelForm({ brands, createVehicleModel }) {
+  const [brandMode, setBrandMode] = useState('EXISTING');
+  const [brandId, setBrandId] = useState('');
+  const [brandName, setBrandName] = useState('');
+  const [modelName, setModelName] = useState('');
+  const [series, setSeries] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    const selectedBrand = brands.find((brand) => String(brand.id) === String(brandId));
+    const finalBrandName = brandMode === 'NEW' ? brandName : selectedBrand?.name;
+    if (!finalBrandName || !modelName) return;
+    setSaving(true);
+    try {
+      await createVehicleModel({
+        brandName: finalBrandName,
+        modelName,
+        series: series || 'Standard'
+      });
+      setModelName('');
+      setSeries('');
+      if (brandMode === 'NEW') setBrandName('');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form className="panel p-4" onSubmit={submit}>
+      <div className="mb-4">
+        <h2 className="text-lg font-black">Add Missing Car Model</h2>
+        <p className="text-sm text-zinc-500">Use this when a brand, model, or type is missing from compatibility.</p>
+      </div>
+      <div className="grid gap-3 md:grid-cols-5">
+        <select className="field" value={brandMode} onChange={(event) => setBrandMode(event.target.value)}>
+          <option value="EXISTING">Existing Brand</option>
+          <option value="NEW">New Brand</option>
+        </select>
+        {brandMode === 'EXISTING' ? (
+          <select className="field" value={brandId} onChange={(event) => setBrandId(event.target.value)} required>
+            <option value="">Brand</option>
+            {brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+          </select>
+        ) : (
+          <input className="field" value={brandName} onChange={(event) => setBrandName(event.target.value)} placeholder="Brand name" required />
+        )}
+        <input className="field" value={modelName} onChange={(event) => setModelName(event.target.value)} placeholder="Model name" required />
+        <input className="field" value={series} onChange={(event) => setSeries(event.target.value)} placeholder="Type / series" />
+        <button className="btn btn-secondary" disabled={saving}>{saving ? 'Saving...' : 'Add Model'}</button>
+      </div>
+    </form>
+  );
+}
+
+function ManualPartForm({ brands, onCreatePart }) {
+  const [brandId, setBrandId] = useState('');
+  const [models, setModels] = useState([]);
+  const [modelName, setModelName] = useState('');
+  const [seriesId, setSeriesId] = useState('');
+  const [priceMode, setPriceMode] = useState('DIRECT');
+  const [form, setForm] = useState({
+    name: '',
+    partNumber: '',
+    serialNo: '',
+    hsnCode: '',
+    companyName: '',
+    stockLevel: '0',
+    warehouseLocation: 'Main Warehouse',
+    section: '',
+    rackNumber: '',
+    shelfBin: '',
+    supplier: '',
+    costPrice: '',
+    sellingPrice: '',
+    purchaseDiscount: '0',
+    gstRate: '18'
+  });
+
+  useEffect(() => {
+    if (!brandId) {
+      setModels([]);
+      setModelName('');
+      setSeriesId('');
+      return;
+    }
+    api(`/brands/${brandId}/models`)
+      .then((data) => {
+        setModels(data);
+        setModelName('');
+        setSeriesId('');
+      })
+      .catch(() => {
+        setModels([]);
+      });
+  }, [brandId]);
+
+  const modelNames = [...new Set(models.map((model) => model.name))].sort();
+  const seriesOptions = models.filter((model) => model.name === modelName);
+  const selectedSeries = models.find((model) => String(model.id) === String(seriesId));
+  const selectedBrand = brands.find((brand) => String(brand.id) === String(brandId));
+
+  const update = (field, value) => setForm((current) => ({ ...current, [field]: value }));
+
+  const purchasePrice = priceMode === 'DISCOUNT'
+    ? round2(Number(form.sellingPrice || 0) * (1 - Number(form.purchaseDiscount || 0) / 100))
+    : Number(form.costPrice || 0);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    const compatibility = selectedSeries
+      ? `${selectedBrand?.name || ''} ${selectedSeries.name} ${selectedSeries.series || 'Standard'}`.trim()
+      : 'Universal';
+    await onCreatePart({
+      imageUrl: null,
+      name: form.name,
+      partNumber: form.partNumber,
+      serialNo: form.serialNo,
+      hsnCode: form.hsnCode,
+      companyName: form.companyName,
+      carCompatibility: compatibility,
+      stockLevel: Number(form.stockLevel || 0),
+      warehouseLocation: form.warehouseLocation,
+      section: form.section,
+      rackNumber: form.rackNumber,
+      shelfBin: form.shelfBin,
+      supplier: form.supplier,
+      costPrice: purchasePrice,
+      sellingPrice: Number(form.sellingPrice || 0),
+      purchaseDiscount: priceMode === 'DISCOUNT' ? Number(form.purchaseDiscount || 0) : 0,
+      gstRate: Number(form.gstRate || 18),
+      modelIds: seriesId ? [Number(seriesId)] : []
+    });
+  };
+
+  return (
+    <form className="mt-5 rounded-lg border border-zinc-800 bg-zinc-900/50 p-4" onSubmit={submit}>
+      <div className="mb-4 grid gap-3 md:grid-cols-6">
+        <input className="field" value={form.name} onChange={(event) => update('name', event.target.value)} placeholder="Part name" required />
+        <input className="field" value={form.partNumber} onChange={(event) => update('partNumber', event.target.value.toUpperCase())} placeholder="Part number / SKU (optional)" />
+        <input className="field" value={form.serialNo} onChange={(event) => update('serialNo', event.target.value)} placeholder="Serial no. (optional)" />
+        <input className="field" value={form.hsnCode} onChange={(event) => update('hsnCode', event.target.value)} placeholder="HSN (optional)" />
+        <input className="field" value={form.companyName} onChange={(event) => update('companyName', event.target.value)} placeholder="Company name" />
+        <input className="field" type="number" min="0" value={form.stockLevel} onChange={(event) => update('stockLevel', event.target.value)} placeholder="Opening stock" required />
+      </div>
+
+      <div className="mb-4 grid gap-3 md:grid-cols-4">
+        <select className="field" value={brandId} onChange={(event) => setBrandId(event.target.value)}>
+          <option value="">Brand</option>
+          {brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+        </select>
+        <select className="field" value={modelName} onChange={(event) => {
+          setModelName(event.target.value);
+          setSeriesId('');
+        }} disabled={!brandId}>
+          <option value="">Model</option>
+          {modelNames.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+        <select className="field" value={seriesId} onChange={(event) => setSeriesId(event.target.value)} disabled={!modelName}>
+          <option value="">Series</option>
+          {seriesOptions.map((model) => <option key={model.id} value={model.id}>{model.series || 'Standard'}</option>)}
+        </select>
+        <input className="field" value={form.rackNumber} onChange={(event) => update('rackNumber', event.target.value.toUpperCase())} placeholder="Rack number" />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-5">
+        <select className="field" value={priceMode} onChange={(event) => setPriceMode(event.target.value)}>
+          <option value="DIRECT">Direct Purchase</option>
+          <option value="DISCOUNT">Dealer Discount %</option>
+        </select>
+        {priceMode === 'DIRECT' ? (
+          <input className="field" type="number" min="0" step="0.01" value={form.costPrice} onChange={(event) => update('costPrice', event.target.value)} placeholder="Purchase price" />
+        ) : (
+          <input className="field" type="number" min="0" max="100" step="0.01" value={form.purchaseDiscount} onChange={(event) => update('purchaseDiscount', event.target.value)} placeholder="Dealer discount %" />
+        )}
+        <input className="field" type="number" min="0" step="0.01" value={form.sellingPrice} onChange={(event) => update('sellingPrice', event.target.value)} placeholder="Selling price" required />
+        <input className="field" type="number" min="0" max="100" step="0.01" value={form.gstRate} onChange={(event) => update('gstRate', event.target.value)} placeholder="GST %" />
+        <button className="btn btn-primary" type="submit">
+          <Save size={16} /> Save Item
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function Purchases({ suppliers, parts, purchases, createPurchase, updatePurchase }) {
+  const [supplierId, setSupplierId] = useState('');
+  const [dealerInvoiceNumber, setDealerInvoiceNumber] = useState('');
+  const [selectedPartId, setSelectedPartId] = useState('');
+  const [quantity, setQuantity] = useState(1);
+  const [unitCost, setUnitCost] = useState('');
+  const [purchaseMode, setPurchaseMode] = useState('DIRECT');
+  const [discountPercentage, setDiscountPercentage] = useState(0);
+  const [items, setItems] = useState([]);
+  const [editingPurchaseId, setEditingPurchaseId] = useState(null);
+  const [purchaseDrafts, setPurchaseDrafts] = useState({});
+
+  const selectedPart = parts.find((part) => String(part.id) === String(selectedPartId));
+  const total = items.reduce((sum, item) => sum + item.lineTotal, 0);
+
+  const addPurchaseItem = () => {
+    if (!selectedPart || Number(quantity) < 1 || Number(unitCost) < 0) return;
+    const finalUnitCost = purchaseMode === 'DISCOUNT'
+      ? round2(Number(selectedPart.sellingPrice || 0) * (1 - Number(discountPercentage || 0) / 100))
+      : Number(unitCost || 0);
+    const lineTotal = round2(Number(quantity) * Number(selectedPart.sellingPrice || 0));
+    setItems((current) => [
+      ...current,
+      {
+        partId: selectedPart.id,
+        partName: selectedPart.name,
+        partNumber: selectedPart.partNumber,
+        currentStock: selectedPart.stockLevel,
+        quantity: Number(quantity),
+        unitCost: finalUnitCost,
+        sellingPrice: Number(selectedPart.sellingPrice || 0),
+        discountPercentage: purchaseMode === 'DISCOUNT' ? Number(discountPercentage || 0) : 0,
+        lineTotal
+      }
+    ]);
+    setSelectedPartId('');
+    setQuantity(1);
+    setUnitCost('');
+    setDiscountPercentage(0);
+  };
+
+  const savePurchase = async () => {
+    if (!supplierId || !items.length) return;
+    const ok = await createPurchase({
+      supplierId: Number(supplierId),
+      dealerInvoiceNumber,
+      purchaseDate: new Date().toISOString().slice(0, 10),
+      notes: 'Dealer purchase entered from web app',
+      items: items.map((item) => ({
+        partId: item.partId,
+        quantity: item.quantity,
+        unitCost: item.unitCost,
+        discountPercentage: item.discountPercentage
+      }))
+    });
+    if (ok) {
+      setDealerInvoiceNumber('');
+      setItems([]);
+    }
+  };
+
+  const startEditPurchase = (purchase) => {
+    setEditingPurchaseId(purchase.id);
+    setPurchaseDrafts({
+      supplierName: purchase.supplierName || '',
+      dealerInvoiceNumber: purchase.dealerInvoiceNumber || '',
+      grandTotal: purchase.grandTotal ?? 0
+    });
+  };
+
+  const saveEditedPurchase = async (purchase) => {
+    const ok = await updatePurchase(purchase.id, {
+      supplierName: purchaseDrafts.supplierName || '',
+      dealerInvoiceNumber: purchaseDrafts.dealerInvoiceNumber || '',
+      grandTotal: Number(purchaseDrafts.grandTotal || 0)
+    });
+    if (ok) {
+      setEditingPurchaseId(null);
+      setPurchaseDrafts({});
+    }
+  };
+
+  return (
+    <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+      <section className="panel p-4">
+        <div className="mb-4">
+          <h2 className="text-lg font-black">Dealer Purchase Entry</h2>
+          <p className="text-sm text-zinc-500">Use this when you buy parts from dealers. It increases inventory and updates the purchase price used internally.</p>
+        </div>
+        <div className="grid gap-3 md:grid-cols-2">
+          <select className="field" value={supplierId} onChange={(event) => setSupplierId(event.target.value)}>
+            <option value="">Select dealer</option>
+            {suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}
+          </select>
+          <input className="field" value={dealerInvoiceNumber} onChange={(event) => setDealerInvoiceNumber(event.target.value)} placeholder="Dealer invoice no." />
+          <select className="field md:col-span-2" value={selectedPartId} onChange={(event) => {
+            setSelectedPartId(event.target.value);
+            const part = parts.find((candidate) => String(candidate.id) === event.target.value);
+            setUnitCost(part ? String(part.costPrice || 0) : '');
+          }}>
+            <option value="">Select purchased part</option>
+            {parts.map((part) => <option key={part.id} value={part.id}>{part.name} / {part.partNumber} / stock {part.stockLevel}</option>)}
+          </select>
+          <input className="field" type="number" min="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} placeholder="Quantity" />
+          <select className="field" value={purchaseMode} onChange={(event) => setPurchaseMode(event.target.value)}>
+            <option value="DIRECT">Direct Price</option>
+            <option value="DISCOUNT">Discount %</option>
+          </select>
+          {purchaseMode === 'DIRECT' ? (
+            <input className="field" type="number" min="0" step="0.01" value={unitCost} onChange={(event) => setUnitCost(event.target.value)} placeholder="Purchase price per unit" />
+          ) : (
+            <input className="field" type="number" min="0" max="100" step="0.01" value={discountPercentage} onChange={(event) => setDiscountPercentage(event.target.value)} placeholder="Dealer discount %" />
+          )}
+          <button className="btn btn-secondary" type="button" onClick={addPurchaseItem}>Add Purchase Line</button>
+        </div>
+
+        <div className="mt-5 space-y-2">
+          {items.map((item, index) => (
+            <div key={`${item.partId}-${index}`} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900 p-3 text-sm">
+              <div>
+                <div className="font-semibold">{item.partName}</div>
+                <div className="text-xs text-zinc-500">{item.partNumber} / Qty {item.quantity} / Purchase {money(item.unitCost)} / Selling {money(item.sellingPrice)}</div>
+              </div>
+              <div className="flex items-center gap-3">
+                <strong>{money(item.lineTotal)}</strong>
+                <button className="text-zinc-500 hover:text-red-300" onClick={() => setItems((current) => current.filter((_, i) => i !== index))}>
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))}
+          {!items.length && <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-zinc-500">Add parts bought from a dealer.</div>}
+        </div>
+        <div className="mt-5 flex items-center justify-between border-t border-zinc-800 pt-4">
+          <strong>Amount</strong>
+          <strong>{money(total)}</strong>
+        </div>
+        <button className="btn btn-primary mt-4 w-full" onClick={savePurchase} disabled={!supplierId || !items.length}>
+          <Save size={17} /> Save Purchase + Add Stock
+        </button>
+      </section>
+
+      <section className="panel p-4">
+        <h2 className="mb-4 text-lg font-black">Recent Dealer Purchases</h2>
+        <div className="space-y-3">
+          {purchases.map((purchase) => (
+            <div key={purchase.id} className="rounded-lg border border-white-800 bg-zinc-900/70 p-4">
+              {editingPurchaseId === purchase.id ? (
+                <div className="grid gap-3 md:grid-cols-[1fr_1fr_160px_auto]">
+                  <input
+                    className="field"
+                    value={purchaseDrafts.supplierName || ''}
+                    onChange={(event) => setPurchaseDrafts({ ...purchaseDrafts, supplierName: event.target.value })}
+                    placeholder="Dealer name"
+                  />
+                  <input
+                    className="field"
+                    value={purchaseDrafts.dealerInvoiceNumber || ''}
+                    onChange={(event) => setPurchaseDrafts({ ...purchaseDrafts, dealerInvoiceNumber: event.target.value })}
+                    placeholder="Invoice no."
+                  />
+                  <input
+                    className="field"
+                    inputMode="decimal"
+                    value={purchaseDrafts.grandTotal ?? ''}
+                    onChange={(event) => setPurchaseDrafts({ ...purchaseDrafts, grandTotal: cleanNumberInput(event.target.value) })}
+                    placeholder="Amount"
+                  />
+                  <div className="flex gap-2">
+                    <button className="btn btn-secondary" onClick={() => saveEditedPurchase(purchase)}><Save size={16} /></button>
+                    <button className="btn btn-danger" onClick={() => {
+                      setEditingPurchaseId(null);
+                      setPurchaseDrafts({});
+                    }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-bold">{purchase.supplierName}</div>
+                    <div className="text-sm text-white-500">{purchase.dealerInvoiceNumber || 'No invoice no.'} / {purchase.purchaseDate}</div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <strong>{money(purchase.grandTotal)}</strong>
+                    <button className="btn btn-secondary" onClick={() => startEditPurchase(purchase)}><Pencil size={16} /></button>
+                  </div>
+                </div>
+              )}
+              <div className="mt-3 text-xs text-zinc-500">{purchase.items.length} line item(s)</div>
+            </div>
+          ))}
+          {!purchases.length && <div className="text-sm text-zinc-500">No dealer purchases recorded yet.</div>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BillHistory({ bills, cancelBill }) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(bills.length / PAGE_SIZE));
+  const pagedBills = bills.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  return (
+    <section className="panel p-4">
+      <h2 className="mb-4 text-lg font-black">Bill History</h2>
+      <div className="space-y-3">
+        {pagedBills.map((bill) => (
+          <div key={bill.id} className="flex flex-col gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="font-bold">{billLabel(bill)} <span className={bill.status === 'CANCELLED' ? 'text-red-300' : 'text-emerald-300'}>{bill.status}</span></div>
+              <div className="text-sm text-zinc-500">{bill.customerName} / {new Date(bill.createdAt).toLocaleString()}</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <strong>{money(billAmount(bill))}</strong>
+              <button className="btn btn-secondary" onClick={() => window.open(printUrlForBill(bill), '_blank')}><Printer size={16} /></button>
+              <button className="btn btn-danger" onClick={() => cancelBill(bill)} disabled={bill.status === 'CANCELLED'}>Cancel</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <Pagination page={page} totalItems={bills.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+    </section>
+  );
+}
+
+function Suppliers({ suppliers, createSupplier }) {
+  return (
+    <div className="grid gap-6 xl:grid-cols-[0.85fr_1.15fr]">
+      <form className="panel space-y-3 p-4" onSubmit={createSupplier}>
+        <h2 className="text-lg font-black">New Supplier</h2>
+        <input className="field" name="name" placeholder="Supplier name" required />
+        <input className="field" name="contactPerson" placeholder="Contact person" />
+        <input className="field" name="phone" placeholder="Phone" />
+        <input className="field" name="address" placeholder="Address" />
+        <input className="field" name="defaultDiscount" type="number" min="0" step="0.01" placeholder="Default purchase discount %" />
+        <button className="btn btn-primary w-full">Save Supplier</button>
+      </form>
+      <section className="panel p-4">
+        <h2 className="mb-4 text-lg font-black">Suppliers</h2>
+        <div className="grid gap-3 md:grid-cols-2">
+          {suppliers.map((supplier) => (
+            <div key={supplier.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+              <div className="font-bold">{supplier.name}</div>
+              <div className="text-sm text-zinc-500">{supplier.contactPerson || 'No contact'} / {supplier.phone || 'No phone'}</div>
+              <div className="mt-3 text-sm text-emerald-300">{supplier.defaultDiscount}% default discount</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export default App;
