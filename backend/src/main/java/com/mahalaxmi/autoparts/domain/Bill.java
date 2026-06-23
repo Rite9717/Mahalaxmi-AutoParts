@@ -8,6 +8,7 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -16,13 +17,22 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Entity
-public class Bill {
+public class    Bill {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
     @Column(nullable = false, unique = true)
     private String billNumber;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private BillType billType = BillType.FINAL;
+
+    @ManyToOne
+    private Mechanic mechanic;
+
+    private String jobReference;
 
     @Column(nullable = false)
     private String customerName;
@@ -63,6 +73,12 @@ public class Bill {
     @Column(nullable = false)
     private BigDecimal grandTotal = BigDecimal.ZERO;
 
+    @Column(nullable = false)
+    private BigDecimal amountPaid = BigDecimal.ZERO;
+
+    @Column(nullable = false)
+    private BigDecimal balanceAmount = BigDecimal.ZERO;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private BillStatus status = BillStatus.PAID;
@@ -72,8 +88,13 @@ public class Bill {
     @Column(nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
+    private Instant finalizedAt;
+
     @OneToMany(mappedBy = "bill", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<BillItem> items = new ArrayList<>();
+
+    @OneToMany(mappedBy = "bill", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<Payment> payments = new ArrayList<>();
 
     public Long getId() {
         return id;
@@ -85,6 +106,30 @@ public class Bill {
 
     public void setBillNumber(String billNumber) {
         this.billNumber = billNumber;
+    }
+
+    public BillType getBillType() {
+        return billType;
+    }
+
+    public void setBillType(BillType billType) {
+        this.billType = billType;
+    }
+
+    public Mechanic getMechanic() {
+        return mechanic;
+    }
+
+    public void setMechanic(Mechanic mechanic) {
+        this.mechanic = mechanic;
+    }
+
+    public String getJobReference() {
+        return jobReference;
+    }
+
+    public void setJobReference(String jobReference) {
+        this.jobReference = jobReference;
     }
 
     public String getCustomerName() {
@@ -199,6 +244,22 @@ public class Bill {
         this.grandTotal = grandTotal;
     }
 
+    public BigDecimal getAmountPaid() {
+        return amountPaid;
+    }
+
+    public void setAmountPaid(BigDecimal amountPaid) {
+        this.amountPaid = amountPaid;
+    }
+
+    public BigDecimal getBalanceAmount() {
+        return balanceAmount;
+    }
+
+    public void setBalanceAmount(BigDecimal balanceAmount) {
+        this.balanceAmount = balanceAmount;
+    }
+
     public BillStatus getStatus() {
         return status;
     }
@@ -219,6 +280,14 @@ public class Bill {
         return createdAt;
     }
 
+    public Instant getFinalizedAt() {
+        return finalizedAt;
+    }
+
+    public void setFinalizedAt(Instant finalizedAt) {
+        this.finalizedAt = finalizedAt;
+    }
+
     public List<BillItem> getItems() {
         return items;
     }
@@ -226,5 +295,14 @@ public class Bill {
     public void addItem(BillItem item) {
         item.setBill(this);
         this.items.add(item);
+    }
+
+    public List<Payment> getPayments() {
+        return payments;
+    }
+
+    public void addPayment(Payment payment) {
+        payment.setBill(this);
+        this.payments.add(payment);
     }
 }

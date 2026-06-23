@@ -1,8 +1,11 @@
 package com.mahalaxmi.autoparts.api;
 
 import com.mahalaxmi.autoparts.domain.Part;
+import com.mahalaxmi.autoparts.repository.BillItemRepository;
 import com.mahalaxmi.autoparts.repository.PartRepository;
+import com.mahalaxmi.autoparts.repository.PurchaseItemRepository;
 import com.mahalaxmi.autoparts.repository.StockTransactionRepository;
+import com.mahalaxmi.autoparts.service.CompatibilityLookupService;
 import com.mahalaxmi.autoparts.service.InventoryService;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -29,19 +32,28 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 @RequestMapping("/api")
 public class PartController {
     private final PartRepository parts;
+    private final BillItemRepository billItems;
+    private final PurchaseItemRepository purchaseItems;
     private final StockTransactionRepository transactions;
     private final InventoryService inventory;
+    private final CompatibilityLookupService compatibilityLookup;
     private final String adminPassword;
 
     public PartController(
             PartRepository parts,
+            BillItemRepository billItems,
+            PurchaseItemRepository purchaseItems,
             StockTransactionRepository transactions,
             InventoryService inventory,
+            CompatibilityLookupService compatibilityLookup,
             @Value("${app.admin.password:1234}") String adminPassword
     ) {
         this.parts = parts;
+        this.billItems = billItems;
+        this.purchaseItems = purchaseItems;
         this.transactions = transactions;
         this.inventory = inventory;
+        this.compatibilityLookup = compatibilityLookup;
         this.adminPassword = adminPassword;
     }
 
@@ -70,6 +82,16 @@ public class PartController {
         return ApiMapper.part(inventory.updatePart(id, request));
     }
 
+    @PostMapping("/parts/{id}/fetch-compatibility")
+    public Dtos.CompatibilityFetchResponse fetchCompatibility(@PathVariable long id) {
+        return compatibilityLookup.fetchForPart(id);
+    }
+
+    @PostMapping("/parts/fetch-missing-compatibility")
+    public List<Dtos.CompatibilityFetchResponse> fetchMissingCompatibility(@RequestParam(defaultValue = "25") int limit) {
+        return compatibilityLookup.fetchMissing(limit);
+    }
+
     @PatchMapping("/parts/{id}/stock")
     @Transactional
     public Dtos.PartResponse updateStock(@PathVariable long id, @Valid @RequestBody Dtos.StockUpdateRequest request) {
@@ -83,9 +105,16 @@ public class PartController {
             throw new ResponseStatusException(FORBIDDEN, "Invalid admin password");
         }
         Part part = parts.findById(id).orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Part not found"));
-        transactions.deleteByPart_Id(id);
         part.getCompatibleModels().clear();
-        parts.delete(part);
+        if (billItems.existsByPart_Id(id) || purchaseItems.existsByPart_Id(id)) {
+            part.setActive(false);
+            part.setStockLevel(0);
+            part.setPartNumber(null);
+            part.setCarCompatibility("Deleted from inventory");
+        } else {
+            transactions.deleteByPart_Id(id);
+            parts.delete(part);
+        }
         return ResponseEntity.noContent().build();
     }
 

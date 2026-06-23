@@ -3,6 +3,7 @@ package com.mahalaxmi.autoparts.api;
 import com.mahalaxmi.autoparts.domain.Bill;
 import com.mahalaxmi.autoparts.domain.BillItem;
 import com.mahalaxmi.autoparts.domain.BillStatus;
+import com.mahalaxmi.autoparts.domain.BillType;
 import com.mahalaxmi.autoparts.repository.BillRepository;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -37,9 +38,10 @@ public class ReportController {
             @RequestParam(required = false) String month
     ) {
         DateRange range = range(mode, date, month);
-        List<Bill> selectedBills = bills.findByBillingDateBetweenAndStatusNotOrderByBillingDateDescCreatedAtDesc(
+        List<Bill> selectedBills = bills.findByBillingDateBetweenAndBillTypeAndStatusNotOrderByBillingDateDescCreatedAtDesc(
                 range.start(),
                 range.end(),
+                BillType.FINAL,
                 BillStatus.CANCELLED
         );
         List<Dtos.SaleLine> sales = saleLines(selectedBills);
@@ -60,8 +62,16 @@ public class ReportController {
 
     @GetMapping(value = "/sales.csv", produces = "text/csv")
     @Transactional(readOnly = true)
-    public ResponseEntity<String> salesCsv(@RequestParam LocalDate date) {
-        var report = profit("DAY", date, null);
+    public ResponseEntity<String> salesCsv(
+            @RequestParam(defaultValue = "DAY") String mode,
+            @RequestParam(required = false) LocalDate date,
+            @RequestParam(required = false) String month
+    ) {
+        var report = profit(mode, date, month);
+        String normalizedMode = "MONTH".equalsIgnoreCase(mode) ? "MONTH" : "DAY";
+        String period = "MONTH".equals(normalizedMode)
+                ? report.startDate().toString().substring(0, 7)
+                : report.startDate().toString();
         StringBuilder csv = new StringBuilder();
         csv.append("Date,Bill No,Customer,Mobile,Part Name,Part No,Company,Qty,Selling Price,Discount,GST,Line Total,Purchase Price,Purchase Total,Profit/Loss\n");
         for (Dtos.SaleLine sale : report.sales()) {
@@ -89,7 +99,7 @@ public class ReportController {
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType("text/csv"))
                 .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
-                        .filename("sales-" + date + ".csv")
+                        .filename("sales-" + period + ".csv")
                         .build()
                         .toString())
                 .body(csv.toString());

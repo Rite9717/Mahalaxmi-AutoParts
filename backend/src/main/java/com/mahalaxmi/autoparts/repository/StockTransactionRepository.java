@@ -8,4 +8,5 @@ public interface StockTransactionRepository extends JpaRepository<StockTransacti
     List<StockTransaction> findTop100ByOrderByCreatedAtDesc();
     long countByPart_Id(Long partId);
     void deleteByPart_Id(Long partId);
+    void deleteByBill_Id(Long billId);
 }

@@ -4,9 +4,12 @@ import com.mahalaxmi.autoparts.api.Dtos;
 import com.mahalaxmi.autoparts.domain.Bill;
 import com.mahalaxmi.autoparts.domain.BillItem;
 import com.mahalaxmi.autoparts.domain.BillStatus;
+import com.mahalaxmi.autoparts.domain.BillType;
 import com.mahalaxmi.autoparts.domain.CarModel;
 import com.mahalaxmi.autoparts.domain.InvoiceType;
+import com.mahalaxmi.autoparts.domain.Mechanic;
 import com.mahalaxmi.autoparts.domain.Part;
+import com.mahalaxmi.autoparts.domain.Payment;
 import com.mahalaxmi.autoparts.domain.Purchase;
 import com.mahalaxmi.autoparts.domain.PurchaseItem;
 import com.mahalaxmi.autoparts.domain.StockTransaction;
@@ -14,13 +17,16 @@ import com.mahalaxmi.autoparts.domain.Supplier;
 import com.mahalaxmi.autoparts.domain.SupplyType;
 import com.mahalaxmi.autoparts.repository.BillRepository;
 import com.mahalaxmi.autoparts.repository.CarModelRepository;
+import com.mahalaxmi.autoparts.repository.MechanicRepository;
 import com.mahalaxmi.autoparts.repository.PartRepository;
+import com.mahalaxmi.autoparts.repository.PaymentRepository;
 import com.mahalaxmi.autoparts.repository.PurchaseRepository;
 import com.mahalaxmi.autoparts.repository.StockTransactionRepository;
 import com.mahalaxmi.autoparts.repository.SupplierRepository;
 import jakarta.persistence.EntityNotFoundException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
@@ -43,6 +49,8 @@ public class InventoryService {
     private final CarModelRepository models;
     private final SupplierRepository suppliers;
     private final BillRepository bills;
+    private final MechanicRepository mechanics;
+    private final PaymentRepository payments;
     private final PurchaseRepository purchases;
     private final StockTransactionRepository stockTransactions;
 
@@ -51,6 +59,8 @@ public class InventoryService {
             CarModelRepository models,
             SupplierRepository suppliers,
             BillRepository bills,
+            MechanicRepository mechanics,
+            PaymentRepository payments,
             PurchaseRepository purchases,
             StockTransactionRepository stockTransactions
     ) {
@@ -58,6 +68,8 @@ public class InventoryService {
         this.models = models;
         this.suppliers = suppliers;
         this.bills = bills;
+        this.mechanics = mechanics;
+        this.payments = payments;
         this.purchases = purchases;
         this.stockTransactions = stockTransactions;
     }
@@ -66,10 +78,14 @@ public class InventoryService {
     public Part createPart(Dtos.PartRequest request) {
         String partNumber = trimToNull(request.partNumber());
         if (partNumber != null) {
-            var existing = parts.findByPartNumber(partNumber);
+            var existing = parts.findByPartNumberAndActiveTrue(partNumber);
             if (existing.isPresent()) {
-                throw new ResponseStatusException(BAD_REQUEST, "Part number already exists");
+                throw new ResponseStatusException(BAD_REQUEST, "Item already present in inventory");
             }
+        } else {
+            parts.findByNameIgnoreCaseAndActiveTrue(request.name().trim()).ifPresent(existing -> {
+                throw new ResponseStatusException(BAD_REQUEST, "Item already present in inventory");
+            });
         }
         Part part = new Part();
         applyPartRequest(part, request);
@@ -86,9 +102,9 @@ public class InventoryService {
         Part part = getPart(id);
         String partNumber = trimToNull(request.partNumber());
         if (partNumber != null) {
-            parts.findByPartNumber(partNumber).ifPresent(existing -> {
+            parts.findByPartNumberAndActiveTrue(partNumber).ifPresent(existing -> {
                 if (!existing.getId().equals(id)) {
-                    throw new ResponseStatusException(BAD_REQUEST, "Part number already exists");
+                    throw new ResponseStatusException(BAD_REQUEST, "Item already present in inventory");
                 }
             });
         }
@@ -168,6 +184,20 @@ public class InventoryService {
 
         Bill bill = new Bill();
         bill.setBillNumber(nextBillNumber());
+        BillType billType = request.billType() == BillType.ONGOING ? BillType.ONGOING : BillType.FINAL;
+        bill.setBillType(billType);
+        if (billType == BillType.ONGOING) {
+            if (request.mechanicId() == null) {
+                throw new ResponseStatusException(BAD_REQUEST, "Select a mechanic for an ongoing bill");
+            }
+            Mechanic mechanic = mechanics.findById(request.mechanicId())
+                    .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Mechanic not found"));
+            bill.setMechanic(mechanic);
+            bill.setJobReference(trimToNull(request.jobReference()));
+        } else {
+            bill.setMechanic(null);
+            bill.setJobReference(null);
+        }
         bill.setCustomerName(blankOrDefault(request.customerName(), "Walk-in Customer"));
         InvoiceType invoiceType = request.invoiceType() == null ? InvoiceType.GST : request.invoiceType();
         bill.setInvoiceType(invoiceType);
@@ -218,6 +248,22 @@ public class InventoryService {
             bill.setIgst(BigDecimal.ZERO);
         }
         bill.setGrandTotal(money(subtotal.add(gstTotal)));
+        if (billType == BillType.ONGOING) {
+            bill.setAmountPaid(BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+            bill.setBalanceAmount(bill.getGrandTotal());
+            bill.setStatus(BillStatus.PENDING);
+        } else {
+            BigDecimal amountReceived = request.amountReceived() == null ? bill.getGrandTotal() : money(request.amountReceived());
+            if (amountReceived.compareTo(BigDecimal.ZERO) < 0) {
+                throw new ResponseStatusException(BAD_REQUEST, "Amount received cannot be negative");
+            }
+            if (amountReceived.compareTo(bill.getGrandTotal()) > 0) {
+                throw new ResponseStatusException(BAD_REQUEST, "Amount received cannot be more than bill total");
+            }
+            bill.setAmountPaid(amountReceived);
+            updateBillBalanceStatus(bill);
+            bill.setFinalizedAt(Instant.now());
+        }
 
         Bill saved = bills.save(bill);
         for (BillItem item : saved.getItems()) {
@@ -260,6 +306,140 @@ public class InventoryService {
             );
         }
         bill.setStatus(BillStatus.CANCELLED);
+        return bill;
+    }
+
+    @Transactional
+    public void deleteCancelledBill(long id) {
+        Bill bill = bills.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Bill not found"));
+        if (bill.getStatus() != BillStatus.CANCELLED) {
+            throw new ResponseStatusException(BAD_REQUEST, "Only cancelled bills can be deleted");
+        }
+        stockTransactions.deleteByBill_Id(bill.getId());
+        bills.delete(bill);
+    }
+
+    @Transactional
+    public Bill updateOngoingBillItems(long id, Dtos.BillItemsUpdateRequest request) {
+        Bill bill = bills.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Bill not found"));
+        ensureEditableOngoingBill(bill);
+        if (request.invoiceType() != null) {
+            bill.setInvoiceType(request.invoiceType());
+            if (request.invoiceType() == InvoiceType.NORMAL) {
+                bill.setCustomerGstin(null);
+            }
+        }
+        if (request.supplyType() != null) {
+            bill.setSupplyType(request.supplyType());
+        }
+        for (BillItem item : bill.getItems()) {
+            Part part = item.getPart();
+            int before = part.getStockLevel();
+            part.setStockLevel(before + item.getQuantity());
+            addStockTransaction(
+                    part,
+                    bill,
+                    "ONGOING_BILL_EDIT_RESTORE",
+                    item.getQuantity(),
+                    before,
+                    part.getStockLevel(),
+                    "Stock restored before editing " + bill.getBillNumber()
+            );
+        }
+        bill.getItems().clear();
+
+        Map<Long, Integer> requestedByPart = new LinkedHashMap<>();
+        Map<Long, BigDecimal> discountAmountByPart = new LinkedHashMap<>();
+        List<Dtos.BillItemRequest> requestedItems = request.items() == null ? List.of() : request.items();
+        for (Dtos.BillItemRequest item : requestedItems) {
+            requestedByPart.merge(item.partId(), item.quantity(), Integer::sum);
+            discountAmountByPart.merge(item.partId(), sanitizeMoney(item.discountAmount()), BigDecimal::add);
+        }
+
+        Map<Long, Part> partById = new LinkedHashMap<>();
+        parts.findAllById(requestedByPart.keySet()).forEach(part -> partById.put(part.getId(), part));
+        BigDecimal subtotal = BigDecimal.ZERO;
+        BigDecimal gstTotal = BigDecimal.ZERO;
+        for (Map.Entry<Long, Integer> entry : requestedByPart.entrySet()) {
+            Part part = partById.get(entry.getKey());
+            if (part == null) {
+                throw new ResponseStatusException(NOT_FOUND, "Part not found: " + entry.getKey());
+            }
+            int quantity = entry.getValue();
+            validateBillPart(part, quantity);
+            BigDecimal discountAmount = discountAmountByPart.getOrDefault(entry.getKey(), BigDecimal.ZERO);
+            BillItem line = buildLine(part, quantity, discountAmount, bill.getInvoiceType() == InvoiceType.GST);
+            bill.addItem(line);
+            subtotal = subtotal.add(line.getTaxableValue());
+            gstTotal = gstTotal.add(line.getGstAmount());
+        }
+
+        applyTotals(bill, subtotal, gstTotal);
+        if (bill.getGrandTotal().compareTo(bill.getAmountPaid()) < 0) {
+            throw new ResponseStatusException(BAD_REQUEST, "Bill total cannot be less than amount already received");
+        }
+        updateBillBalanceStatus(bill);
+
+        for (BillItem item : bill.getItems()) {
+            Part part = item.getPart();
+            int before = part.getStockLevel();
+            part.setStockLevel(before - item.getQuantity());
+            addStockTransaction(
+                    part,
+                    bill,
+                    "ONGOING_BILL_UPDATED",
+                    -item.getQuantity(),
+                    before,
+                    part.getStockLevel(),
+                    "Stock reserved for edited " + bill.getBillNumber()
+            );
+        }
+        return bill;
+    }
+
+    @Transactional
+    public Bill recordPayment(long billId, Dtos.PaymentRequest request) {
+        Bill bill = bills.findById(billId)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Bill not found"));
+        if (bill.getStatus() == BillStatus.CANCELLED) {
+            throw new ResponseStatusException(BAD_REQUEST, "Cannot record payment on a cancelled bill");
+        }
+        BigDecimal amount = money(request.amount());
+        if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new ResponseStatusException(BAD_REQUEST, "Payment amount must be greater than zero");
+        }
+        if (amount.compareTo(bill.getBalanceAmount()) > 0) {
+            throw new ResponseStatusException(BAD_REQUEST, "Payment cannot be more than remaining balance");
+        }
+        Payment payment = new Payment();
+        payment.setAmount(amount);
+        payment.setPaymentDate(request.paymentDate() == null ? LocalDate.now() : request.paymentDate());
+        payment.setNotes(trimToNull(request.notes()));
+        bill.addPayment(payment);
+        payments.save(payment);
+        bill.setAmountPaid(money(bill.getAmountPaid().add(amount)));
+        updateBillBalanceStatus(bill);
+        return bill;
+    }
+
+    @Transactional
+    public Bill finalizeOngoingBill(long id) {
+        Bill bill = bills.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Bill not found"));
+        if (bill.getBillType() != BillType.ONGOING) {
+            throw new ResponseStatusException(BAD_REQUEST, "Only ongoing bills can be finalized");
+        }
+        if (bill.getStatus() == BillStatus.CANCELLED) {
+            throw new ResponseStatusException(BAD_REQUEST, "Cancelled bill cannot be finalized");
+        }
+        if (bill.getBalanceAmount().compareTo(BigDecimal.ZERO) > 0) {
+            throw new ResponseStatusException(BAD_REQUEST, "Collect full payment before finalizing this credit bill");
+        }
+        bill.setBillType(BillType.FINAL);
+        bill.setStatus(BillStatus.FULLY_PAID);
+        bill.setFinalizedAt(Instant.now());
         return bill;
     }
 
@@ -425,6 +605,72 @@ public class InventoryService {
         item.setLineTotal(finalAmount);
         item.setGrossProfit(money(taxable.subtract(unitCost.multiply(BigDecimal.valueOf(quantity)))));
         return item;
+    }
+
+    private void validateBillPart(Part part, int requestedQuantity) {
+        if (requestedQuantity <= 0) {
+            throw new ResponseStatusException(BAD_REQUEST, "Quantity must be greater than zero");
+        }
+        if (part.getSellingPrice() == null || part.getSellingPrice().compareTo(BigDecimal.ZERO) <= 0) {
+            throw new ResponseStatusException(BAD_REQUEST, "Selling price must be greater than zero for " + part.getName());
+        }
+        if (part.getStockLevel() < requestedQuantity) {
+            throw new ResponseStatusException(
+                    BAD_REQUEST,
+                    "Insufficient stock for " + part.getName() + ". Available: " + part.getStockLevel() + ", requested: " + requestedQuantity
+            );
+        }
+    }
+
+    private void applyTotals(Bill bill, BigDecimal subtotal, BigDecimal gstTotal) {
+        subtotal = money(subtotal);
+        gstTotal = money(gstTotal);
+        bill.setSubtotal(subtotal);
+        bill.setGstTotal(gstTotal);
+        if (bill.getInvoiceType() == InvoiceType.NORMAL) {
+            bill.setIgst(BigDecimal.ZERO);
+            bill.setCgst(BigDecimal.ZERO);
+            bill.setSgst(BigDecimal.ZERO);
+        } else if (bill.getSupplyType() == SupplyType.INTER_STATE) {
+            bill.setIgst(gstTotal);
+            bill.setCgst(BigDecimal.ZERO);
+            bill.setSgst(BigDecimal.ZERO);
+        } else {
+            BigDecimal half = money(gstTotal.divide(BigDecimal.valueOf(2), 4, RoundingMode.HALF_UP));
+            bill.setCgst(half);
+            bill.setSgst(money(gstTotal.subtract(half)));
+            bill.setIgst(BigDecimal.ZERO);
+        }
+        bill.setGrandTotal(money(subtotal.add(gstTotal)));
+    }
+
+    private void updateBillBalanceStatus(Bill bill) {
+        BigDecimal paid = money(bill.getAmountPaid());
+        BigDecimal balance = money(bill.getGrandTotal().subtract(paid));
+        bill.setAmountPaid(paid);
+        bill.setBalanceAmount(balance);
+        if (bill.getStatus() == BillStatus.CANCELLED) {
+            return;
+        }
+        if (bill.getGrandTotal().compareTo(BigDecimal.ZERO) == 0 && paid.compareTo(BigDecimal.ZERO) == 0) {
+            bill.setStatus(BillStatus.PENDING);
+        } else if (balance.compareTo(BigDecimal.ZERO) <= 0) {
+            bill.setBalanceAmount(BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+            bill.setStatus(bill.getBillType() == BillType.ONGOING ? BillStatus.FULLY_PAID : BillStatus.PAID);
+        } else if (paid.compareTo(BigDecimal.ZERO) > 0) {
+            bill.setStatus(BillStatus.PARTIALLY_PAID);
+        } else {
+            bill.setStatus(BillStatus.PENDING);
+        }
+    }
+
+    private void ensureEditableOngoingBill(Bill bill) {
+        if (bill.getBillType() != BillType.ONGOING) {
+            throw new ResponseStatusException(BAD_REQUEST, "Final bills cannot be edited");
+        }
+        if (bill.getStatus() == BillStatus.CANCELLED) {
+            throw new ResponseStatusException(BAD_REQUEST, "Cancelled bill cannot be edited");
+        }
     }
 
     private void addStockTransaction(Part part, Bill bill, String type, int change, int before, int after, String note) {

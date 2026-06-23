@@ -47,8 +47,8 @@ public class CatalogController {
     @Transactional
     public Dtos.ModelResponse createModel(@Valid @RequestBody Dtos.ModelRequest request) {
         String brandName = request.brandName().trim();
-        String modelName = request.modelName().trim();
-        String series = request.series() == null || request.series().trim().isBlank() ? "Standard" : request.series().trim();
+        String modelName = request.modelName().trim().toUpperCase();
+        String series = request.series() == null || request.series().trim().isBlank() ? "STANDARD" : request.series().trim().toUpperCase();
         var brand = brands.findByName(brandName).orElseGet(() -> {
             var created = new com.mahalaxmi.autoparts.domain.CarBrand();
             created.setName(brandName);

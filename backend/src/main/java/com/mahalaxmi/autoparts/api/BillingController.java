@@ -1,6 +1,8 @@
 package com.mahalaxmi.autoparts.api;
 
 import com.mahalaxmi.autoparts.domain.Bill;
+import com.mahalaxmi.autoparts.domain.BillStatus;
+import com.mahalaxmi.autoparts.domain.BillType;
 import com.mahalaxmi.autoparts.domain.InvoiceType;
 import com.mahalaxmi.autoparts.domain.SupplyType;
 import com.mahalaxmi.autoparts.repository.BillRepository;
@@ -8,13 +10,18 @@ import com.mahalaxmi.autoparts.service.InventoryService;
 import jakarta.validation.Valid;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.util.HtmlUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
@@ -25,18 +32,27 @@ import static org.springframework.http.HttpStatus.NOT_FOUND;
 @RestController
 @RequestMapping("/api/bills")
 public class BillingController {
+    private static final DateTimeFormatter BILL_DATE_FORMAT = DateTimeFormatter.ofPattern("dd-MM-yyyy");
     private final BillRepository bills;
     private final InventoryService inventory;
+    private final String adminPassword;
 
-    public BillingController(BillRepository bills, InventoryService inventory) {
+    public BillingController(BillRepository bills, InventoryService inventory, @Value("${app.admin.password:1234}") String adminPassword) {
         this.bills = bills;
         this.inventory = inventory;
+        this.adminPassword = adminPassword;
     }
 
     @GetMapping
     @Transactional(readOnly = true)
     public List<Dtos.BillResponse> bills() {
-        return bills.findTop100ByOrderByCreatedAtDesc().stream().map(ApiMapper::bill).toList();
+        return bills.findTop100ByBillTypeOrderByCreatedAtDesc(BillType.FINAL).stream().map(ApiMapper::bill).toList();
+    }
+
+    @GetMapping("/ongoing")
+    @Transactional(readOnly = true)
+    public List<Dtos.BillResponse> ongoingBills() {
+        return bills.findTop100ByBillTypeAndStatusNotOrderByCreatedAtDesc(BillType.ONGOING, BillStatus.CANCELLED).stream().map(ApiMapper::bill).toList();
     }
 
     @GetMapping("/{id}")
@@ -46,27 +62,59 @@ public class BillingController {
     }
 
     @PostMapping
+    @Transactional
     public Dtos.BillResponse createBill(@Valid @RequestBody Dtos.BillRequest request) {
         return ApiMapper.bill(inventory.createBill(request));
     }
 
     @PostMapping("/{id}/cancel")
+    @Transactional
     public Dtos.BillResponse cancelBill(@PathVariable long id) {
         return ApiMapper.bill(inventory.cancelBill(id));
+    }
+
+    @DeleteMapping("/{id}")
+    @Transactional
+    public void deleteCancelledBill(@PathVariable long id, @RequestHeader(name = "X-Admin-Password", required = false) String password) {
+        if (adminPassword == null || adminPassword.isBlank() || password == null || !adminPassword.equals(password)) {
+            throw new ResponseStatusException(org.springframework.http.HttpStatus.FORBIDDEN, "Invalid admin password");
+        }
+        inventory.deleteCancelledBill(id);
+    }
+
+    @PutMapping("/{id}/items")
+    @Transactional
+    public Dtos.BillResponse updateOngoingBillItems(@PathVariable long id, @Valid @RequestBody Dtos.BillItemsUpdateRequest request) {
+        return ApiMapper.bill(inventory.updateOngoingBillItems(id, request));
+    }
+
+    @PostMapping("/{id}/payments")
+    @Transactional
+    public Dtos.BillResponse recordPayment(@PathVariable long id, @Valid @RequestBody Dtos.PaymentRequest request) {
+        return ApiMapper.bill(inventory.recordPayment(id, request));
+    }
+
+    @PostMapping("/{id}/finalize")
+    @Transactional
+    public Dtos.BillResponse finalizeBill(@PathVariable long id) {
+        return ApiMapper.bill(inventory.finalizeOngoingBill(id));
     }
 
     @GetMapping(value = "/{id}/print", produces = MediaType.TEXT_HTML_VALUE)
     @Transactional(readOnly = true)
     public String printBill(@PathVariable long id) {
-        Bill bill = findBill(id);
+        Bill bill = bills.findByIdWithItemsAndParts(id)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Bill not found"));
         boolean normalBill = bill.getInvoiceType() == InvoiceType.NORMAL;
+        boolean intraState = !normalBill && bill.getSupplyType() == SupplyType.INTRA_STATE;
         StringBuilder rows = new StringBuilder();
         for (int i = 0; i < bill.getItems().size(); i++) {
             var item = bill.getItems().get(i);
-            String companyName = firstPresent(item.getCompanyName(), item.getPart().getCompanyName());
-            String partNumber = firstPresent(item.getPartNumber(), item.getPart().getPartNumber());
-            String serialNo = firstPresent(item.getSerialNo(), item.getPart().getSerialNo());
-            String hsnCode = firstPresent(item.getHsnCode(), item.getPart().getHsnCode());
+            var linkedPart = item.getPart();
+            String companyName = firstPresent(item.getCompanyName(), linkedPart == null ? null : linkedPart.getCompanyName());
+            String partNumber = firstPresent(item.getPartNumber(), linkedPart == null ? null : linkedPart.getPartNumber());
+            String serialNo = firstPresent(item.getSerialNo(), linkedPart == null ? null : linkedPart.getSerialNo());
+            String hsnCode = firstPresent(item.getHsnCode(), linkedPart == null ? null : linkedPart.getHsnCode());
             String companyLine = blankLine(companyName);
             String partNumberLine = partNumber.isBlank() ? "" : "<span>Part No: " + html(partNumber) + "</span>";
             String serialNoLine = serialNo.isBlank() ? "" : "<span>Serial No: " + html(serialNo) + "</span>";
@@ -78,7 +126,7 @@ public class BillingController {
                       <td class="center">%s</td>
                       <td class="right">%d</td>
                       <td class="right">%s</td>
-                      <td class="right strong">%s</td>
+                      <td class="right strong money">%s</td>
                     </tr>
                     """.formatted(
                         i + 1,
@@ -92,43 +140,72 @@ public class BillingController {
                         rupee(item.getLineTotal())
                 ));
             } else {
-                boolean intraState = bill.getSupplyType() == SupplyType.INTRA_STATE;
                 BigDecimal cgst = intraState ? half(item.getGstAmount()) : BigDecimal.ZERO;
                 BigDecimal sgst = intraState ? half(item.getGstAmount()) : BigDecimal.ZERO;
                 BigDecimal igst = intraState ? BigDecimal.ZERO : item.getGstAmount();
-                rows.append("""
-                <tr>
-                  <td class="center">%d</td>
-                  <td>
-                    <strong>%s</strong>
-                    %s
-                    %s
-                    %s
-                  </td>
-                  <td class="center">%s</td>
-                  <td class="right">%d</td>
-                  <td class="right">%s</td>
-                  <td class="right">%s</td>
-                  <td class="right">%s</td>
-                  <td class="right">%s</td>
-                  <td class="right">%s</td>
-                  <td class="right strong">%s</td>
-                </tr>
-                """.formatted(
-                        i + 1,
-                        html(item.getPartName()),
-                        companyLine,
-                        partNumberLine,
-                        serialNoLine,
-                        html(hsnCode.isBlank() ? "-" : hsnCode),
-                        item.getQuantity(),
-                        rupee(item.getUnitPrice()),
-                        rupee(item.getTaxableValue()),
-                        rupee(cgst),
-                        rupee(sgst),
-                        rupee(igst),
-                        rupee(item.getLineTotal())
-                ));
+                if (intraState) {
+                    rows.append("""
+                    <tr>
+                      <td class="center">%d</td>
+                      <td>
+                        <strong>%s</strong>
+                        %s
+                        %s
+                        %s
+                      </td>
+                      <td class="center">%s</td>
+                      <td class="right">%d</td>
+                      <td class="right money">%s</td>
+                      <td class="right money">%s</td>
+                      <td class="right money">%s</td>
+                      <td class="right money">%s</td>
+                      <td class="right strong money">%s</td>
+                    </tr>
+                    """.formatted(
+                            i + 1,
+                            html(item.getPartName()),
+                            companyLine,
+                            partNumberLine,
+                            serialNoLine,
+                            html(hsnCode.isBlank() ? "-" : hsnCode),
+                            item.getQuantity(),
+                            rupee(item.getUnitPrice()),
+                            rupee(item.getTaxableValue()),
+                            rupee(cgst),
+                            rupee(sgst),
+                            rupee(item.getLineTotal())
+                    ));
+                } else {
+                    rows.append("""
+                    <tr>
+                      <td class="center">%d</td>
+                      <td>
+                        <strong>%s</strong>
+                        %s
+                        %s
+                        %s
+                      </td>
+                      <td class="center">%s</td>
+                      <td class="right">%d</td>
+                      <td class="right">%s</td>
+                      <td class="right">%s</td>
+                      <td class="right">%s</td>
+                      <td class="right money">%s</td>
+                    </tr>
+                    """.formatted(
+                            i + 1,
+                            html(item.getPartName()),
+                            companyLine,
+                            partNumberLine,
+                            serialNoLine,
+                            html(hsnCode.isBlank() ? "-" : hsnCode),
+                            item.getQuantity(),
+                            rupee(item.getUnitPrice()),
+                            rupee(item.getTaxableValue()),
+                            rupee(igst),
+                            rupee(item.getLineTotal())
+                    ));
+                }
             }
         }
 
@@ -139,6 +216,16 @@ public class BillingController {
         String customerGstinLine = normalBill ? "" : "<div class=\"muted\">GSTIN: " + html(bill.getCustomerGstin()) + "</div>";
         String customerAddress = nullToBlank(bill.getCustomerAddress()).isBlank() ? "Address not provided" : bill.getCustomerAddress();
         String customerMobile = nullToBlank(bill.getCustomerMobile()).isBlank() ? "Mobile not provided" : "Mobile: " + bill.getCustomerMobile();
+        String tableClass = normalBill ? "invoice-table normal" : intraState ? "invoice-table gst intra" : "invoice-table gst inter";
+        String paymentSummaryTop = bill.getBillType() == BillType.ONGOING ? """
+                        <div class="meta-row"><span>Total</span><strong>%s</strong></div>
+                        <div class="meta-row"><span>Paid</span><strong>%s</strong></div>
+                        <div class="meta-row"><span>Balance</span><strong>%s</strong></div>
+                """.formatted(
+                rupee(bill.getGrandTotal()),
+                rupee(bill.getAmountPaid()),
+                rupee(bill.getBalanceAmount())
+        ) : "";
         String tableHead = normalBill ? """
                         <tr>
                           <th>S.no</th>
@@ -146,6 +233,18 @@ public class BillingController {
                           <th>HSN/SAC</th>
                           <th class="right">Qty</th>
                           <th class="right">Rate</th>
+                          <th class="right">Amount</th>
+                        </tr>
+                """ : intraState ? """
+                        <tr>
+                          <th>S.no</th>
+                          <th>Item Description</th>
+                          <th>HSN/SAC</th>
+                          <th class="right">Qty</th>
+                          <th class="right">Rate</th>
+                          <th class="right">Taxable</th>
+                          <th class="right">CGST 9%%</th>
+                          <th class="right">SGST 9%%</th>
                           <th class="right">Amount</th>
                         </tr>
                 """ : """
@@ -156,29 +255,45 @@ public class BillingController {
                           <th class="right">Qty</th>
                           <th class="right">Rate</th>
                           <th class="right">Taxable</th>
-                          <th class="right">CGST 9%%</th>
-                          <th class="right">SGST 9%%</th>
                           <th class="right">IGST</th>
                           <th class="right">Amount</th>
                         </tr>
                 """;
         String totalsRows = normalBill ? """
                         <div class="total-row grand"><span>Total Amount</span><strong>%s</strong></div>
-                """.formatted(rupee(bill.getGrandTotal())) : """
+                """.formatted(rupee(bill.getGrandTotal())) : intraState ? """
                         <div class="total-row"><span>Taxable Value</span><strong>%s</strong></div>
                         <div class="total-row"><span>CGST 9%%</span><strong>%s</strong></div>
                         <div class="total-row"><span>SGST 9%%</span><strong>%s</strong></div>
-                        <div class="total-row"><span>IGST</span><strong>%s</strong></div>
                         <div class="total-row"><span>Total GST</span><strong>%s</strong></div>
                         <div class="total-row grand"><span>Grand Total</span><strong>%s</strong></div>
                 """.formatted(
                 rupee(bill.getSubtotal()),
                 rupee(bill.getCgst()),
                 rupee(bill.getSgst()),
+                rupee(bill.getGstTotal()),
+                rupee(bill.getGrandTotal())
+        ) : """
+                        <div class="total-row"><span>Taxable Value</span><strong>%s</strong></div>
+                        <div class="total-row"><span>IGST</span><strong>%s</strong></div>
+                        <div class="total-row"><span>Total GST</span><strong>%s</strong></div>
+                        <div class="total-row grand"><span>Grand Total</span><strong>%s</strong></div>
+                """.formatted(
+                rupee(bill.getSubtotal()),
                 rupee(bill.getIgst()),
                 rupee(bill.getGstTotal()),
                 rupee(bill.getGrandTotal())
         );
+        boolean showPaymentSummary = bill.getBillType() == BillType.ONGOING
+                || nullToZero(bill.getAmountPaid()).compareTo(BigDecimal.ZERO) > 0
+                || nullToZero(bill.getBalanceAmount()).compareTo(BigDecimal.ZERO) > 0;
+        String paymentRows = showPaymentSummary ? """
+                        <div class="total-row"><span>Amount Received</span><strong>%s</strong></div>
+                        <div class="total-row"><span>Balance Amount</span><strong>%s</strong></div>
+                """.formatted(
+                rupee(bill.getAmountPaid()),
+                rupee(bill.getBalanceAmount())
+        ) : "";
 
         return """
                 <!doctype html>
@@ -280,22 +395,83 @@ public class BillingController {
                       gap: 12px;
                       margin-top: 16px;
                     }
-                    table {
+                    table.invoice-table {
                       border-collapse: collapse;
                       margin-top: 16px;
                       width: 100%%;
+                      table-layout: fixed;
                     }
-                    th {
+                    table.invoice-table th {
                       background: #f3f4f6;
                       color: var(--ink);
                       font-size: 10px;
                       letter-spacing: 0.04em;
                       text-transform: uppercase;
                     }
-                    th, td {
+                    table.invoice-table th,
+                    table.invoice-table td {
                       border: 1px solid var(--line);
-                      padding: 7px 6px;
+                      padding: 4px 3px;
                       vertical-align: top;
+                      word-break: break-word;
+                      overflow-wrap: anywhere;
+                      font-size: 11px;
+                    }
+                    table.invoice-table th.right,
+                    table.invoice-table td.right,
+                    table.invoice-table th.center,
+                    table.invoice-table td.center {
+                      white-space: nowrap;
+                    }
+                    table.invoice-table.normal th:nth-child(1),
+                    table.invoice-table.normal td:nth-child(1) { width: 7%%; }
+                    table.invoice-table.normal th:nth-child(2),
+                    table.invoice-table.normal td:nth-child(2) { width: 45%%; }
+                    table.invoice-table.normal th:nth-child(3),
+                    table.invoice-table.normal td:nth-child(3) { width: 11%%; }
+                    table.invoice-table.normal th:nth-child(4),
+                    table.invoice-table.normal td:nth-child(4) { width: 8%%; }
+                    table.invoice-table.normal th:nth-child(5),
+                    table.invoice-table.normal td:nth-child(5) { width: 14%%; }
+                    table.invoice-table.normal th:nth-child(6),
+                    table.invoice-table.normal td:nth-child(6) { width: 15%%; }
+                    table.invoice-table.gst.intra th:nth-child(1),
+                    table.invoice-table.gst.intra td:nth-child(1) { width: 5%%; }
+                    table.invoice-table.gst.intra th:nth-child(2),
+                    table.invoice-table.gst.intra td:nth-child(2) { width: 26%%; }
+                    table.invoice-table.gst.intra th:nth-child(3),
+                    table.invoice-table.gst.intra td:nth-child(3) { width: 9%%; }
+                    table.invoice-table.gst.intra th:nth-child(4),
+                    table.invoice-table.gst.intra td:nth-child(4) { width: 6%%; }
+                    table.invoice-table.gst.intra th:nth-child(5),
+                    table.invoice-table.gst.intra td:nth-child(5) { width: 9%%; }
+                    table.invoice-table.gst.intra th:nth-child(6),
+                    table.invoice-table.gst.intra td:nth-child(6) { width: 11%%; }
+                    table.invoice-table.gst.intra th:nth-child(7),
+                    table.invoice-table.gst.intra td:nth-child(7) { width: 10%%; }
+                    table.invoice-table.gst.intra th:nth-child(8),
+                    table.invoice-table.gst.intra td:nth-child(8) { width: 10%%; }
+                    table.invoice-table.gst.intra th:nth-child(9),
+                    table.invoice-table.gst.intra td:nth-child(9) { width: 14%%; }
+                    table.invoice-table.gst.inter th:nth-child(1),
+                    table.invoice-table.gst.inter td:nth-child(1) { width: 5%%; }
+                    table.invoice-table.gst.inter th:nth-child(2),
+                    table.invoice-table.gst.inter td:nth-child(2) { width: 32%%; }
+                    table.invoice-table.gst.inter th:nth-child(3),
+                    table.invoice-table.gst.inter td:nth-child(3) { width: 10%%; }
+                    table.invoice-table.gst.inter th:nth-child(4),
+                    table.invoice-table.gst.inter td:nth-child(4) { width: 7%%; }
+                    table.invoice-table.gst.inter th:nth-child(5),
+                    table.invoice-table.gst.inter td:nth-child(5) { width: 10%%; }
+                    table.invoice-table.gst.inter th:nth-child(6),
+                    table.invoice-table.gst.inter td:nth-child(6) { width: 12%%; }
+                    table.invoice-table.gst.inter th:nth-child(7),
+                    table.invoice-table.gst.inter td:nth-child(7) { width: 10%%; }
+                    table.invoice-table.gst.inter th:nth-child(8),
+                    table.invoice-table.gst.inter td:nth-child(8) { width: 14%%; }
+                    .money {
+                      white-space: nowrap;
+                      font-variant-numeric: tabular-nums;
                     }
                     td span {
                       color: var(--muted);
@@ -391,6 +567,7 @@ public class BillingController {
                           <div class="meta-row"><span>Payment Mode</span><strong>%s</strong></div>
                           <div class="meta-row"><span>Bill Type</span><strong>%s</strong></div>
                           <div class="meta-row"><span>Status</span><strong class="status %s">%s</strong></div>
+                          %s
                         </div>
                       </div>
                     </section>
@@ -411,7 +588,7 @@ public class BillingController {
                       </div>
                     </section>
 
-                    <table>
+                    <table class="%s">
                       <thead>
                         %s
                       </thead>
@@ -425,6 +602,7 @@ public class BillingController {
                         Electrical/electronic parts must be checked before fitting. Warranty, if any, is as provided by the manufacturer.
                       </div>
                       <div class="totals">
+                        %s
                         %s
                       </div>
                     </section>
@@ -443,19 +621,22 @@ public class BillingController {
                 html(printLabel),
                 html(invoiceTitle),
                 html(bill.getBillNumber()),
-                bill.getBillingDate(),
+                bill.getBillingDate() == null ? "" : bill.getBillingDate().format(BILL_DATE_FORMAT),
                 html(bill.getPaymentMode()),
                 html(supplyType),
                 statusClass(bill.getStatus().name()),
                 html(bill.getStatus().name()),
+                paymentSummaryTop,
                 html(bill.getCustomerName()),
                 html(customerAddress),
                 html(customerMobile),
                 customerGstinLine,
                 html(notes.isBlank() ? "No additional notes." : notes),
+                tableClass,
                 tableHead,
                 rows,
-                totalsRows
+                totalsRows,
+                paymentRows
         );
     }
 

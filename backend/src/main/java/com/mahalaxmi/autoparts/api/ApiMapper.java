@@ -2,9 +2,14 @@ package com.mahalaxmi.autoparts.api;
 
 import com.mahalaxmi.autoparts.domain.Bill;
 import com.mahalaxmi.autoparts.domain.BillItem;
+import com.mahalaxmi.autoparts.domain.DealerOrder;
+import com.mahalaxmi.autoparts.domain.DealerOrderItem;
 import com.mahalaxmi.autoparts.domain.CarBrand;
 import com.mahalaxmi.autoparts.domain.CarModel;
+import com.mahalaxmi.autoparts.domain.DealerPurchaseEntry;
+import com.mahalaxmi.autoparts.domain.Mechanic;
 import com.mahalaxmi.autoparts.domain.Part;
+import com.mahalaxmi.autoparts.domain.Payment;
 import com.mahalaxmi.autoparts.domain.Purchase;
 import com.mahalaxmi.autoparts.domain.PurchaseItem;
 import com.mahalaxmi.autoparts.domain.StockTransaction;
@@ -85,16 +90,25 @@ public final class ApiMapper {
                 bill.getBillingDate(),
                 bill.getSupplyType(),
                 bill.getPaymentMode(),
+                bill.getBillType(),
+                bill.getMechanic() == null ? null : bill.getMechanic().getId(),
+                bill.getMechanic() == null ? null : bill.getMechanic().getMechanicName(),
+                bill.getMechanic() == null ? null : bill.getMechanic().getGarageName(),
+                bill.getJobReference(),
                 bill.getSubtotal(),
                 bill.getGstTotal(),
                 bill.getCgst(),
                 bill.getSgst(),
                 bill.getIgst(),
                 bill.getGrandTotal(),
+                bill.getAmountPaid(),
+                bill.getBalanceAmount(),
                 bill.getStatus(),
                 bill.getNotes(),
                 bill.getCreatedAt(),
+                bill.getFinalizedAt(),
                 bill.getItems().stream().map(ApiMapper::billItem).toList(),
+                bill.getPayments().stream().map(ApiMapper::payment).toList(),
                 "/api/bills/" + bill.getId() + "/print"
         );
     }
@@ -115,6 +129,29 @@ public final class ApiMapper {
                 item.getTaxableValue(),
                 item.getGstAmount(),
                 item.getLineTotal()
+        );
+    }
+
+    public static Dtos.PaymentResponse payment(Payment payment) {
+        return new Dtos.PaymentResponse(
+                payment.getId(),
+                payment.getBill().getId(),
+                payment.getAmount(),
+                payment.getPaymentDate(),
+                payment.getNotes(),
+                payment.getCreatedAt()
+        );
+    }
+
+    public static Dtos.MechanicResponse mechanic(Mechanic mechanic, java.math.BigDecimal totalOutstanding, long ongoingBills, long completedBills) {
+        return new Dtos.MechanicResponse(
+                mechanic.getId(),
+                mechanic.getMechanicName(),
+                mechanic.getGarageName(),
+                totalOutstanding,
+                ongoingBills,
+                completedBills,
+                mechanic.getCreatedAt()
         );
     }
 
@@ -144,6 +181,41 @@ public final class ApiMapper {
                 item.getUnitCost(),
                 item.getDiscountPercentage(),
                 item.getLineTotal()
+        );
+    }
+
+    public static Dtos.ManualPurchaseResponse manualPurchase(DealerPurchaseEntry entry) {
+        return new Dtos.ManualPurchaseResponse(
+                entry.getId(),
+                entry.getDealerName(),
+                entry.getQuantity(),
+                entry.getPrice(),
+                entry.getTotalAmount(),
+                entry.getPurchaseDate(),
+                entry.getCreatedAt()
+        );
+    }
+
+    public static Dtos.DealerOrderResponse dealerOrder(DealerOrder order) {
+        return new Dtos.DealerOrderResponse(
+                order.getId(),
+                order.getOrderNumber(),
+                order.getDealerName(),
+                order.getOrderDate(),
+                order.getNotes(),
+                order.getCreatedAt(),
+                order.getItems().stream().map(ApiMapper::dealerOrderItem).toList(),
+                "/api/orders/" + order.getId() + "/print"
+        );
+    }
+
+    public static Dtos.DealerOrderItemResponse dealerOrderItem(DealerOrderItem item) {
+        return new Dtos.DealerOrderItemResponse(
+                item.getId(),
+                item.getItemName(),
+                item.getPartNumber(),
+                item.getQuantity(),
+                item.getNote()
         );
     }
 

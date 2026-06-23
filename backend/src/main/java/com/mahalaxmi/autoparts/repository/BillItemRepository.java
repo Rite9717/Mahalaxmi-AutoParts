@@ -12,12 +12,12 @@ public interface BillItemRepository extends JpaRepository<BillItem, Long> {
     @Query("""
             select bi.partName, bi.partNumber, sum(bi.quantity)
             from BillItem bi
-            where bi.bill.status <> 'CANCELLED'
+            where bi.bill.billType = 'FINAL' and bi.bill.status <> 'CANCELLED'
             group by bi.partName, bi.partNumber
             order by sum(bi.quantity) desc
             """)
     List<Object[]> topSelling();
 
-    @Query("select coalesce(sum(bi.grossProfit), 0) from BillItem bi where bi.bill.status <> 'CANCELLED'")
+    @Query("select coalesce(sum(bi.grossProfit), 0) from BillItem bi where bi.bill.billType = 'FINAL' and bi.bill.status <> 'CANCELLED'")
     BigDecimal totalGrossProfit();
 }

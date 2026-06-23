@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Backend = Join-Path $Root "backend"
-$AppUrl = "http://localhost:8080"
+$AppUrl = "http://localhost:8080/?v=$(Get-Date -Format 'yyyyMMddHHmmss')"
 $HealthUrl = "http://localhost:8080/api/health"
 
 function Test-Port($Port) {

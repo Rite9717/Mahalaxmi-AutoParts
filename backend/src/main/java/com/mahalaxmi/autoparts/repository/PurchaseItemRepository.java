@@ -4,4 +4,5 @@ import com.mahalaxmi.autoparts.domain.PurchaseItem;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface PurchaseItemRepository extends JpaRepository<PurchaseItem, Long> {
+    boolean existsByPart_Id(Long partId);
 }
