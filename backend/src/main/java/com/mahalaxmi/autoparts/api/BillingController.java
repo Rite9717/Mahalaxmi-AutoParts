@@ -122,7 +122,7 @@ public class BillingController {
                 rows.append("""
                     <tr>
                       <td class="center">%d</td>
-                      <td><strong>%s</strong>%s%s%s</td>
+                      <td><strong>%s</strong>%s</td>
                       <td class="center">%s</td>
                       <td class="right">%d</td>
                       <td class="right">%s</td>
@@ -132,8 +132,6 @@ public class BillingController {
                         i + 1,
                         html(item.getPartName()),
                         companyLine,
-                        partNumberLine,
-                        serialNoLine,
                         html(hsnCode.isBlank() ? "-" : hsnCode),
                         item.getQuantity(),
                         rupee(item.getUnitPrice()),
