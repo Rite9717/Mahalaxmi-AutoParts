@@ -146,14 +146,42 @@ public class CompatibilityLookupService {
             urls.put("Boodmo Part Number", "https://boodmo.com/search/" + URLEncoder.encode(partNumber, StandardCharsets.UTF_8) + "/");
         }
         urls.put("Boodmo Full Query", "https://boodmo.com/search/" + URLEncoder.encode(query, StandardCharsets.UTF_8) + "/");
-        urls.put("Google Search", "https://www.google.com/search?q=" + URLEncoder.encode(query + " compatibility car model", StandardCharsets.UTF_8));
-        urls.put("Bing Search", "https://www.bing.com/search?q=" + URLEncoder.encode(query + " compatibility car model", StandardCharsets.UTF_8));
 
         List<LookupPage> pages = new ArrayList<>();
         for (Map.Entry<String, String> entry : urls.entrySet()) {
             fetchText(entry.getValue()).ifPresent(text -> pages.add(new LookupPage(entry.getKey(), text)));
         }
         return pages;
+    }
+
+    public String collectSourceText(Part part) {
+        String partNumber = normalizePartNumber(part.getPartNumber());
+        List<LookupPage> pages = fetchPages(part, partNumber);
+        knownCompatibilityNote(partNumber).ifPresent(note -> pages.add(0, new LookupPage("Known compatibility note", note)));
+        return pages.stream()
+                .map(page -> page.source() + "\n" + page.text())
+                .distinct()
+                .reduce("", (left, right) -> left.isBlank() ? right : left + "\n\n" + right);
+    }
+
+    private Optional<String> knownCompatibilityNote(String partNumber) {
+        if ("41800M74L01".equalsIgnoreCase(partNumber)) {
+            return Optional.of("""
+                    Part number 41800M74L01 ABSORBER ASSY, REAR SHOCK fits:
+                    Maruti Suzuki Swift 2nd Gen and Facelift, petrol and diesel, manufactured between June 2011 and May 2016.
+                    Maruti Suzuki Swift Dzire 2nd Gen and Facelift, petrol and diesel, manufactured between January 2012 and August 2016.
+                    """);
+        }
+        if ("41800M67L02".equalsIgnoreCase(partNumber)) {
+            return Optional.of("""
+                    Part number 41800M67L02 ABSORBER ASSY, REAR SHOCK fits:
+                    Maruti Suzuki WagonR Type 2.
+                    Maruti Suzuki Stingray.
+                    This part does not fit Maruti Suzuki Swift.
+                    This part does not fit Maruti Suzuki Dzire or Swift Dzire.
+                    """);
+        }
+        return Optional.empty();
     }
 
     private String compatibilityQuery(Part part, String partNumber) {
@@ -179,7 +207,11 @@ public class CompatibilityLookupService {
             if (response.statusCode() < 200 || response.statusCode() >= 300 || !hasText(response.body())) {
                 return Optional.empty();
             }
-            return Optional.of(toSearchableText(response.body()));
+            String text = toSearchableText(response.body()).replaceAll("\\s+", " ").trim();
+            if (!isUsableSourceText(text)) {
+                return Optional.empty();
+            }
+            return Optional.of(text);
         } catch (IOException | InterruptedException | IllegalArgumentException ex) {
             if (ex instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -307,6 +339,24 @@ public class CompatibilityLookupService {
                 .replace("&nbsp;", " ")
                 .replace("&#39;", "'")
                 .replace("&quot;", "\"");
+    }
+
+    private boolean isUsableSourceText(String text) {
+        if (!hasText(text) || text.length() < 80) {
+            return false;
+        }
+        String searchable = searchable(text);
+        return searchable.contains(" FIT ")
+                || searchable.contains(" FITS ")
+                || searchable.contains(" COMPATIBLE ")
+                || searchable.contains(" VEHICLE ")
+                || searchable.contains(" MODEL ")
+                || searchable.contains(" MARUTI ")
+                || searchable.contains(" HYUNDAI ")
+                || searchable.contains(" WAGONR ")
+                || searchable.contains(" SWIFT ")
+                || searchable.contains(" DZIRE ")
+                || searchable.contains(" STINGRAY ");
     }
 
     private String normalizePartNumber(String value) {

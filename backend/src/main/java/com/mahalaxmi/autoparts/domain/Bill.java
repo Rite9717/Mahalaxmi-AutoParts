@@ -40,6 +40,8 @@ public class    Bill {
     private String customerGstin;
     private String customerAddress;
     private String customerMobile;
+    private String carNumber;
+    private String aadhaarNumber;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
@@ -162,6 +164,22 @@ public class    Bill {
 
     public void setCustomerMobile(String customerMobile) {
         this.customerMobile = customerMobile;
+    }
+
+    public String getCarNumber() {
+        return carNumber;
+    }
+
+    public void setCarNumber(String carNumber) {
+        this.carNumber = carNumber;
+    }
+
+    public String getAadhaarNumber() {
+        return aadhaarNumber;
+    }
+
+    public void setAadhaarNumber(String aadhaarNumber) {
+        this.aadhaarNumber = aadhaarNumber;
     }
 
     public InvoiceType getInvoiceType() {

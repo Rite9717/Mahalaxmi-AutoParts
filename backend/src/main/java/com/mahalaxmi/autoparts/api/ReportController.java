@@ -44,10 +44,10 @@ public class ReportController {
                 BillType.FINAL,
                 BillStatus.CANCELLED
         );
-        List<Dtos.SaleLine> sales = saleLines(selectedBills);
-        BigDecimal salesTotal = sales.stream().map(Dtos.SaleLine::lineTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
-        BigDecimal purchaseCost = sales.stream().map(Dtos.SaleLine::purchaseTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
-        long quantitySold = sales.stream().mapToLong(Dtos.SaleLine::quantity).sum();
+        List<Dtos.BillSaleLine> sales = billSaleLines(selectedBills);
+        BigDecimal salesTotal = sales.stream().map(Dtos.BillSaleLine::salesTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
+        BigDecimal purchaseCost = sales.stream().map(Dtos.BillSaleLine::purchaseTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
+        long quantitySold = sales.stream().mapToLong(Dtos.BillSaleLine::quantity).sum();
         return new Dtos.ProfitReport(
                 range.start(),
                 range.end(),
@@ -74,7 +74,7 @@ public class ReportController {
                 : report.startDate().toString();
         StringBuilder csv = new StringBuilder();
         csv.append("Date,Bill No,Customer,Mobile,Part Name,Part No,Company,Qty,Selling Price,Discount,GST,Line Total,Purchase Price,Purchase Total,Profit/Loss\n");
-        for (Dtos.SaleLine sale : report.sales()) {
+        for (Dtos.SaleLine sale : saleLines(selectedBills(range(mode, date, month)))) {
             csv.append(csv(sale.billingDate().toString())).append(',')
                     .append(csv(sale.billNumber())).append(',')
                     .append(csv(sale.customerName())).append(',')
@@ -103,6 +103,47 @@ public class ReportController {
                         .build()
                         .toString())
                 .body(csv.toString());
+    }
+
+    private List<Bill> selectedBills(DateRange range) {
+        return bills.findByBillingDateBetweenAndBillTypeAndStatusNotOrderByBillingDateDescCreatedAtDesc(
+                range.start(),
+                range.end(),
+                BillType.FINAL,
+                BillStatus.CANCELLED
+        );
+    }
+
+    private List<Dtos.BillSaleLine> billSaleLines(List<Bill> selectedBills) {
+        List<Dtos.BillSaleLine> sales = new ArrayList<>();
+        for (Bill bill : selectedBills) {
+            BigDecimal purchaseTotal = BigDecimal.ZERO;
+            int quantity = 0;
+            for (BillItem item : bill.getItems()) {
+                BigDecimal unitCost = money(item.getUnitCost());
+                purchaseTotal = purchaseTotal.add(unitCost.multiply(BigDecimal.valueOf(item.getQuantity())));
+                quantity += item.getQuantity();
+            }
+            purchaseTotal = money(purchaseTotal);
+            BigDecimal salesTotal = money(bill.getGrandTotal());
+            BigDecimal profit = money(salesTotal.subtract(purchaseTotal));
+            sales.add(new Dtos.BillSaleLine(
+                    bill.getBillingDate(),
+                    bill.getBillNumber(),
+                    bill.getCustomerName(),
+                    bill.getCustomerMobile(),
+                    bill.getItems().size(),
+                    quantity,
+                    salesTotal,
+                    money(bill.getGstTotal()),
+                    purchaseTotal,
+                    profit,
+                    money(bill.getAmountPaid()),
+                    money(bill.getBalanceAmount()),
+                    bill.getStatus() == null ? "" : bill.getStatus().name()
+            ));
+        }
+        return sales;
     }
 
     private List<Dtos.SaleLine> saleLines(List<Bill> selectedBills) {

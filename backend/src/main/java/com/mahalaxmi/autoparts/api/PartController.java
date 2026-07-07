@@ -7,8 +7,10 @@ import com.mahalaxmi.autoparts.repository.PurchaseItemRepository;
 import com.mahalaxmi.autoparts.repository.StockTransactionRepository;
 import com.mahalaxmi.autoparts.service.CompatibilityLookupService;
 import com.mahalaxmi.autoparts.service.InventoryService;
+import com.mahalaxmi.autoparts.service.OllamaService;
 import jakarta.validation.Valid;
 import java.util.List;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -38,6 +40,7 @@ public class PartController {
     private final InventoryService inventory;
     private final CompatibilityLookupService compatibilityLookup;
     private final String adminPassword;
+    private final OllamaService ollamaService;
 
     public PartController(
             PartRepository parts,
@@ -46,7 +49,7 @@ public class PartController {
             StockTransactionRepository transactions,
             InventoryService inventory,
             CompatibilityLookupService compatibilityLookup,
-            @Value("${app.admin.password:1234}") String adminPassword
+            @Value("${app.admin.password:1234}") String adminPassword, OllamaService ollamaService
     ) {
         this.parts = parts;
         this.billItems = billItems;
@@ -55,6 +58,7 @@ public class PartController {
         this.inventory = inventory;
         this.compatibilityLookup = compatibilityLookup;
         this.adminPassword = adminPassword;
+        this.ollamaService = ollamaService;
     }
 
     @GetMapping("/parts")
@@ -90,6 +94,36 @@ public class PartController {
     @PostMapping("/parts/fetch-missing-compatibility")
     public List<Dtos.CompatibilityFetchResponse> fetchMissingCompatibility(@RequestParam(defaultValue = "25") int limit) {
         return compatibilityLookup.fetchMissing(limit);
+    }
+
+    @GetMapping("/parts/{id}/compatibility-ai-preview")
+    public Dtos.CompatibilityAiPreviewResponse compatibilityAiPreviewGet(@PathVariable long id) {
+        return compatibilityAiPreview(id);
+    }
+
+    @PostMapping("/parts/{id}/compatibility-ai-preview")
+    public Dtos.CompatibilityAiPreviewResponse compatibilityAiPreview(@PathVariable long id) {
+        Part part = parts.findById(id).orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Part not found"));
+        String sourceText = compatibilityLookup.collectSourceText(part);
+        List<Dtos.CompatibilityAiSuggestion> suggestions;
+        String message;
+        try {
+            suggestions = ollamaService.suggestCompatibility(part, sourceText);
+            message = suggestions.isEmpty()
+                    ? "No verified compatibility suggestions found."
+                    : "Found " + suggestions.size() + " compatibility suggestion(s).";
+        } catch (RuntimeException ex) {
+            suggestions = List.of();
+            message = "Compatibility AI preview failed: " + ex.getMessage();
+        }
+        return new Dtos.CompatibilityAiPreviewResponse(
+                part.getId(),
+                part.getName(),
+                part.getPartNumber(),
+                part.getCompanyName(),
+                suggestions,
+                message
+        );
     }
 
     @PatchMapping("/parts/{id}/stock")

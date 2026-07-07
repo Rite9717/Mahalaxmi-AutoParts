@@ -22,7 +22,17 @@ import {
   X
 } from 'lucide-react';
 
-const API_BASE = process.env.REACT_APP_API_BASE || 'http://localhost:8080/api';
+function resolveApiBase() {
+  if (process.env.REACT_APP_API_BASE) return process.env.REACT_APP_API_BASE;
+  if (typeof window === 'undefined') return '/api';
+  const { protocol, hostname, port } = window.location;
+  if (port === '3000' || port === '5173') {
+    return `${protocol}//${hostname}:8080/api`;
+  }
+  return '/api';
+}
+
+const API_BASE = resolveApiBase();
 const DEFAULT_ADMIN_PASSWORD = process.env.REACT_APP_ADMIN_PASSWORD || '1234';
 const PAGE_SIZE = 50;
 
@@ -43,11 +53,18 @@ function formatBillDate(value) {
 
 async function api(path, options = {}) {
   const isFormData = options.body instanceof FormData;
-  const response = await fetch(`${API_BASE}${path}`, {
+  const requestOptions = {
     headers: isFormData ? (options.headers || {}) : { 'Content-Type': 'application/json', ...(options.headers || {}) },
     cache: options.cache || 'no-store',
     ...options
-  });
+  };
+  let response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, requestOptions);
+  } catch (error) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    response = await fetch(`${API_BASE}${path}`, requestOptions);
+  }
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
@@ -68,6 +85,10 @@ async function api(path, options = {}) {
   }
 }
 
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
+
 function billLabel(bill) {
   return bill.billNumber || bill.invoiceNumber || `Bill #${bill.id}`;
 }
@@ -79,17 +100,17 @@ function billAmount(bill) {
 function printUrlForBill(bill) {
   if (bill.printUrl) {
     if (bill.printUrl.startsWith('http')) return bill.printUrl;
-    return `${API_BASE}${bill.printUrl.replace(/^\/api/, '')}`;
+    return apiUrl(bill.printUrl.replace(/^\/api/, ''));
   }
-  return `${API_BASE}/bills/${bill.id}/print`;
+  return apiUrl(`/bills/${bill.id}/print`);
 }
 
 function printUrlForOrder(order) {
   if (order.printUrl) {
     if (order.printUrl.startsWith('http')) return order.printUrl;
-    return `${API_BASE}${order.printUrl.replace(/^\/api/, '')}`;
+    return apiUrl(order.printUrl.replace(/^\/api/, ''));
   }
-  return `${API_BASE}/orders/${order.id}/print`;
+  return apiUrl(`/orders/${order.id}/print`);
 }
 
 function calculatedPurchasePrice(row) {
@@ -138,6 +159,8 @@ function App() {
     customerGstin: '',
     customerAddress: '',
     customerMobile: '',
+    carNumber: '',
+    aadhaarNumber: '',
     invoiceType: 'NORMAL',
     billingDate: new Date().toISOString().slice(0, 10),
     supplyType: 'INTRA_STATE',
@@ -294,7 +317,8 @@ function App() {
       const nextQuantity = Math.max(1, Number(quantityInput || 1));
       const safeQuantity = Math.min(part.stockLevel, nextQuantity);
       const gross = Number(part.sellingPrice || 0) * safeQuantity;
-      const discount = Math.min(gross, Math.max(0, Number(cleanNumberInput(patch.discountAmount ?? item.discountAmount) || 0)));
+      const rawDiscount = Number(cleanSignedNumberInput(patch.discountAmount ?? item.discountAmount) || 0);
+      const discount = rawDiscount > 0 ? Math.min(gross, rawDiscount) : rawDiscount;
       return makeCartLine(part, safeQuantity, discount);
     }));
   };
@@ -924,7 +948,8 @@ function App() {
 function makeCartLine(part, quantity, discountAmount = 0) {
   const numericQuantity = Number(quantity || 0);
   const gross = Number(part.sellingPrice || 0) * numericQuantity;
-  const safeDiscount = Math.min(gross, Math.max(0, Number(discountAmount || 0)));
+  const rawDiscount = Number(discountAmount || 0);
+  const safeDiscount = rawDiscount > 0 ? Math.min(gross, rawDiscount) : rawDiscount;
   const lineTotal = round2(gross - safeDiscount);
   const gstRate = Number(part.gstRate || 0);
   const taxableValue = gstRate > 0 ? round2(lineTotal * 100 / (100 + gstRate)) : lineTotal;
@@ -961,6 +986,15 @@ function cleanNumberInput(value) {
     return `${String(Number(whole || 0))}.${decimal}`;
   }
   return String(Number(cleaned));
+}
+
+function cleanSignedNumberInput(value) {
+  const raw = String(value ?? '').trim();
+  const negative = raw.startsWith('-');
+  const cleaned = raw.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+  if (!cleaned) return negative ? '-' : '';
+  const normalized = cleaned.includes('.') ? cleaned.replace(/^0+(?=\d)/, '') : String(Number(cleaned));
+  return `${negative ? '-' : ''}${normalized}`;
 }
 
 function modelLabel(model) {
@@ -1133,6 +1167,8 @@ function BillingScreen(props) {
           <input className="field" type="date" value={customer.billingDate} onChange={(event) => setCustomer({ ...customer, billingDate: event.target.value })} />
           <input className="field" value={customer.customerName} onChange={(event) => setCustomer({ ...customer, customerName: event.target.value })} placeholder="Customer name" />
           <input className="field" value={customer.customerMobile} onChange={(event) => setCustomer({ ...customer, customerMobile: event.target.value })} placeholder="Customer mobile" />
+          <input className="field" value={customer.carNumber} onChange={(event) => setCustomer({ ...customer, carNumber: event.target.value.toUpperCase() })} placeholder="Car number (optional)" />
+          <input className="field" value={customer.aadhaarNumber} onChange={(event) => setCustomer({ ...customer, aadhaarNumber: event.target.value })} placeholder="Aadhaar no. (optional)" />
           {customer.invoiceType === 'GST' && <input className="field" value={customer.customerGstin} onChange={(event) => setCustomer({ ...customer, customerGstin: event.target.value.toUpperCase() })} placeholder="Customer GSTIN (optional)" />}
           {customer.invoiceType === 'GST' && (
             <select className="field" value={customer.supplyType} onChange={(event) => setCustomer({ ...customer, supplyType: event.target.value })}>
@@ -1187,6 +1223,7 @@ function BillingScreen(props) {
             </>
           )}
           {customer.invoiceType === 'GST' && <textarea className="field h-20 md:col-span-2" value={customer.customerAddress} onChange={(event) => setCustomer({ ...customer, customerAddress: event.target.value })} placeholder="Customer address" />}
+          <textarea className="field h-20 md:col-span-2" value={customer.notes} onChange={(event) => setCustomer({ ...customer, notes: event.target.value })} placeholder="Additional notes (optional)" />
         </div>
 
         <div className="mt-5 space-y-3">
@@ -1317,7 +1354,7 @@ function Dashboard({ stats, bills = [] }) {
     const query = reportMode === 'MONTH'
       ? `mode=MONTH&month=${reportMonth}`
       : `mode=DAY&date=${reportDate}`;
-    window.open(`${API_BASE}/reports/sales.csv?${query}`, '_blank');
+    window.open(apiUrl(`/reports/sales.csv?${query}`), '_blank');
   };
 
   const periodLabel = reportMode === 'MONTH'
@@ -1444,23 +1481,23 @@ function Dashboard({ stats, bills = [] }) {
               <Stat icon={IndianRupee} label="Profit / Loss" value={money(report.profitLoss)} tone={Number(report.profitLoss || 0) >= 0 ? 'text-emerald-300' : 'text-red-300'} />
             </div>
             <div className="overflow-x-auto rounded-lg border border-zinc-800">
-              <table className="w-full min-w-[1250px] text-left text-sm">
+              <table className="w-full min-w-[1180px] text-left text-sm">
                 <thead className="bg-zinc-900 text-xs uppercase text-zinc-500">
                   <tr>
                     <th className="px-3 py-3">Date</th>
                     <th>Bill</th>
                     <th>Customer</th>
-                    <th>Part</th>
+                    <th>Items</th>
                     <th>Qty</th>
-                    <th>Selling</th>
-                    <th>Total</th>
-                    <th>Purchase</th>
+                    <th>Bill Total</th>
+                    <th>Paid / Balance</th>
+                    <th>Purchase Cost</th>
                     <th>Profit / Loss</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800">
                   {report.sales.map((sale, index) => (
-                    <tr key={`${sale.billNumber}-${sale.partNumber}-${index}`}>
+                    <tr key={`${sale.billNumber}-${index}`}>
                       <td className="px-3 py-3">{sale.billingDate}</td>
                       <td>{sale.billNumber}</td>
                       <td>
@@ -1468,12 +1505,15 @@ function Dashboard({ stats, bills = [] }) {
                         <div className="text-xs text-zinc-500">{sale.customerMobile || ''}</div>
                       </td>
                       <td>
-                        <div className="font-semibold">{sale.partName}</div>
-                        <div className="text-xs text-zinc-500">{sale.companyName || ''} {sale.partNumber || ''}</div>
+                        <div className="font-semibold">{sale.itemCount} item{Number(sale.itemCount || 0) === 1 ? '' : 's'}</div>
+                        <div className="text-xs text-zinc-500">{sale.status || ''}</div>
                       </td>
                       <td>{sale.quantity}</td>
-                      <td>{money(sale.unitSellingPrice)}</td>
-                      <td>{money(sale.lineTotal)}</td>
+                      <td>{money(sale.salesTotal)}</td>
+                      <td>
+                        <div>{money(sale.amountPaid)}</div>
+                        <div className="text-xs text-zinc-500">{money(sale.balanceAmount)}</div>
+                      </td>
                       <td>{money(sale.purchaseTotal)}</td>
                       <td className={Number(sale.profitLoss || 0) >= 0 ? 'font-bold text-emerald-300' : 'font-bold text-red-300'}>{money(sale.profitLoss)}</td>
                     </tr>
@@ -2538,7 +2578,6 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
       setMessage('Add at least one item before saving.');
       return;
     }
-    const printWindow = window.open('', '_blank');
     const payload = { dealerName, orderDate, notes, items };
     const order = editingOrderId
       ? await updateDealerOrder(editingOrderId, payload)
@@ -2551,14 +2590,22 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
       setDraftItem({ itemName: '', partNumber: '', quantity: '1', note: '' });
       setMessage('');
       setEditingOrderId(null);
-      if (printWindow) {
-        printWindow.location.href = printUrlForOrder(order);
-      } else {
-        window.open(printUrlForOrder(order), '_blank');
-      }
-    } else if (printWindow) {
-      printWindow.close();
     }
+  };
+
+  const printOrder = async () => {
+    const payload = { dealerName, orderDate, notes, items };
+    if (editingOrderId) {
+      const order = await updateDealerOrder(editingOrderId, payload);
+      if (order) window.open(printUrlForOrder(order), '_blank');
+      return;
+    }
+    if (!items.length) {
+      setMessage('Add at least one item before printing.');
+      return;
+    }
+    const order = await createDealerOrder(payload);
+    if (order) window.open(printUrlForOrder(order), '_blank');
   };
 
   return (
@@ -2640,7 +2687,10 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
               </button>
             )}
             <button className="btn btn-primary" type="button" onClick={saveOrder}>
-              <Save size={16} /> {editingOrderId ? 'Update & Print' : 'Save & Print'}
+              <Save size={16} /> {editingOrderId ? 'Update Order' : 'Save Order'}
+            </button>
+            <button className="btn btn-secondary" type="button" onClick={printOrder}>
+              <Printer size={16} /> Print Order
             </button>
           </div>
         </div>
@@ -2853,7 +2903,7 @@ function OngoingBills({ bills, allParts, updateOngoingBillItems, recordPayment, 
                 </div>
                 <label className="space-y-1">
                   <span className="text-[10px] font-semibold uppercase text-zinc-500">Discount</span>
-                  <input className="field" inputMode="decimal" value={item.discountAmount || ''} onChange={(event) => setDraftItems((items) => items.map((row, rowIndex) => rowIndex === index ? { ...row, discountAmount: cleanNumberInput(event.target.value) } : row))} placeholder="Discount" />
+                  <input className="field" inputMode="decimal" value={item.discountAmount || ''} onChange={(event) => setDraftItems((items) => items.map((row, rowIndex) => rowIndex === index ? { ...row, discountAmount: cleanSignedNumberInput(event.target.value) } : row))} placeholder="Discount" />
                 </label>
                 <button className="btn btn-danger" onClick={async () => {
                   const nextItems = draftItems.filter((_, rowIndex) => rowIndex !== index);

@@ -214,6 +214,8 @@ public class BillingController {
         String customerGstinLine = normalBill ? "" : "<div class=\"muted\">GSTIN: " + html(bill.getCustomerGstin()) + "</div>";
         String customerAddress = nullToBlank(bill.getCustomerAddress()).isBlank() ? "Address not provided" : bill.getCustomerAddress();
         String customerMobile = nullToBlank(bill.getCustomerMobile()).isBlank() ? "Mobile not provided" : "Mobile: " + bill.getCustomerMobile();
+        String customerCarLine = nullToBlank(bill.getCarNumber()).isBlank() ? "" : "<div class=\"muted\">Car No.: " + html(bill.getCarNumber()) + "</div>";
+        String customerAadhaarLine = nullToBlank(bill.getAadhaarNumber()).isBlank() ? "" : "<div class=\"muted\">Aadhaar: " + html(bill.getAadhaarNumber()) + "</div>";
         String tableClass = normalBill ? "invoice-table normal" : intraState ? "invoice-table gst intra" : "invoice-table gst inter";
         String paymentSummaryTop = bill.getBillType() == BillType.ONGOING ? """
                         <div class="meta-row"><span>Total</span><strong>%s</strong></div>
@@ -578,6 +580,8 @@ public class BillingController {
                           <div class="muted">%s</div>
                           <div class="muted">%s</div>
                           %s
+                          %s
+                          %s
                         </div>
                       </div>
                       <div class="box">
@@ -629,6 +633,8 @@ public class BillingController {
                 html(customerAddress),
                 html(customerMobile),
                 customerGstinLine,
+                customerCarLine,
+                customerAadhaarLine,
                 html(notes.isBlank() ? "No additional notes." : notes),
                 tableClass,
                 tableHead,

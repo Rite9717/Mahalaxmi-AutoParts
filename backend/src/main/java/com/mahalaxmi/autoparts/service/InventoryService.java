@@ -202,6 +202,8 @@ public class InventoryService {
         InvoiceType invoiceType = request.invoiceType() == null ? InvoiceType.GST : request.invoiceType();
         bill.setInvoiceType(invoiceType);
         bill.setCustomerMobile(trimToNull(request.customerMobile()));
+        bill.setCarNumber(trimToNull(request.carNumber()));
+        bill.setAadhaarNumber(trimToNull(request.aadhaarNumber()));
         if (invoiceType == InvoiceType.GST) {
             String gstin = trimToNull(request.customerGstin());
             if (gstin != null && !GSTIN.matcher(gstin.toUpperCase()).matches()) {
@@ -572,10 +574,7 @@ public class InventoryService {
         BigDecimal discount = sanitizeMoney(requestedDiscountAmount);
         BigDecimal gstRate = gstRateOrDefault(part.getGstRate());
         BigDecimal unitCost = nullToZero(part.getCostPrice());
-        if (discount.compareTo(BigDecimal.ZERO) < 0) {
-            discount = BigDecimal.ZERO;
-        }
-        if (discount.compareTo(gross) > 0) {
+        if (discount.compareTo(BigDecimal.ZERO) > 0 && discount.compareTo(gross) > 0) {
             discount = money(gross);
         }
         BigDecimal finalAmount = money(gross.subtract(discount));

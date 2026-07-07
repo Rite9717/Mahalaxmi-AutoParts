@@ -14,6 +14,14 @@ public class WebConfig implements WebMvcConfigurer {
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
                 .allowedOrigins(allowedOrigins.split(","))
+                .allowedOriginPatterns(
+                        "http://192.168.*.*:3000",
+                        "http://192.168.*.*:5173",
+                        "http://192.168.*.*:8080",
+                        "http://10.*.*.*:3000",
+                        "http://10.*.*.*:5173",
+                        "http://10.*.*.*:8080"
+                )
                 .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
                 .allowedHeaders("*");
     }

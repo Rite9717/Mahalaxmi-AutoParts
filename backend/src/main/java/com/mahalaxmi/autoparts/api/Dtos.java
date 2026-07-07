@@ -65,6 +65,16 @@ public final class Dtos {
     ) {
     }
 
+    public record CompatibilityAiPreviewResponse(
+            Long partId,
+            String partName,
+            String partNumber,
+            String companyName,
+            List<CompatibilityAiSuggestion> suggestions,
+            String message
+    ) {
+    }
+
     public record PartRequest(
             String imageUrl,
             @NotBlank String name,
@@ -114,7 +124,7 @@ public final class Dtos {
     ) {
     }
 
-    public record BillItemRequest(@NotNull Long partId, @Min(1) int quantity, @DecimalMin("0.0") BigDecimal discountAmount) {
+    public record BillItemRequest(@NotNull Long partId, @Min(1) int quantity, BigDecimal discountAmount) {
     }
 
     public record BillRequest(
@@ -122,6 +132,8 @@ public final class Dtos {
             String customerGstin,
             String customerAddress,
             String customerMobile,
+            String carNumber,
+            String aadhaarNumber,
             InvoiceType invoiceType,
             LocalDate billingDate,
             SupplyType supplyType,
@@ -145,7 +157,24 @@ public final class Dtos {
                 String notes,
                 List<BillItemRequest> items
         ) {
-            this(customerName, customerGstin, customerAddress, customerMobile, invoiceType, billingDate, supplyType, paymentMode, BillType.FINAL, null, null, null, notes, items);
+            this(customerName, customerGstin, customerAddress, customerMobile, null, null, invoiceType, billingDate, supplyType, paymentMode, BillType.FINAL, null, null, null, notes, items);
+        }
+
+        public BillRequest(
+                String customerName,
+                String customerGstin,
+                String customerAddress,
+                String customerMobile,
+                String carNumber,
+                String aadhaarNumber,
+                InvoiceType invoiceType,
+                LocalDate billingDate,
+                SupplyType supplyType,
+                String paymentMode,
+                String notes,
+                List<BillItemRequest> items
+        ) {
+            this(customerName, customerGstin, customerAddress, customerMobile, carNumber, aadhaarNumber, invoiceType, billingDate, supplyType, paymentMode, BillType.FINAL, null, null, null, notes, items);
         }
     }
 
@@ -194,6 +223,8 @@ public final class Dtos {
             String customerGstin,
             String customerAddress,
             String customerMobile,
+            String carNumber,
+            String aadhaarNumber,
             InvoiceType invoiceType,
             LocalDate billingDate,
             SupplyType supplyType,
@@ -294,7 +325,24 @@ public final class Dtos {
             BigDecimal salesTotal,
             BigDecimal purchaseCost,
             BigDecimal profitLoss,
-            List<SaleLine> sales
+            List<BillSaleLine> sales
+    ) {
+    }
+
+    public record BillSaleLine(
+            LocalDate billingDate,
+            String billNumber,
+            String customerName,
+            String customerMobile,
+            int itemCount,
+            int quantity,
+            BigDecimal salesTotal,
+            BigDecimal gstAmount,
+            BigDecimal purchaseTotal,
+            BigDecimal profitLoss,
+            BigDecimal amountPaid,
+            BigDecimal balanceAmount,
+            String status
     ) {
     }
 
@@ -458,4 +506,11 @@ public final class Dtos {
             String printUrl
     ) {
     }
+    public record CompatibilityAiSuggestion(
+            String brand,
+            String model,
+            String series,
+            String confidence,
+            String source
+    ) {}
 }

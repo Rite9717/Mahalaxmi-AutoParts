@@ -127,6 +127,9 @@ public class DealerOrderController {
                     body { font-family: Arial, sans-serif; margin: 0; background: #eceff3; color: #111827; }
                     .page { width: 210mm; min-height: 297mm; margin: 18px auto; background: white; padding: 14mm; box-shadow: 0 20px 55px rgba(15, 23, 42, 0.18); }
                     .print-action { border: 0; border-radius: 4px; background: #b91c1c; color: white; cursor: pointer; font-size: 13px; font-weight: 700; margin-bottom: 14px; padding: 9px 14px; }
+                    .shop-header { border-bottom: 2px solid #111827; margin-bottom: 12px; padding-bottom: 10px; }
+                    .shop-header h1 { font-size: 26px; margin: 0 0 5px; text-transform: uppercase; }
+                    .shop-header .tagline { color: #b91c1c; font-size: 11px; font-weight: 800; margin-bottom: 6px; text-transform: uppercase; }
                     .title { border: 2px solid #111827; font-size: 18px; font-weight: 800; padding: 8px 12px; text-align: center; text-transform: uppercase; }
                     .meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 14px; }
                     .box { border: 1px solid #d8dee8; border-radius: 6px; padding: 10px; flex: 1; }
@@ -143,6 +146,13 @@ public class DealerOrderController {
                 <body>
                   <main class="page">
                     <button class="print-action" onclick="window.print()">Print / Save PDF</button>
+                    <section class="shop-header">
+                      <h1>Mahalaxmi Automobiles</h1>
+                      <div class="tagline">Automobile Spare Parts, Retail and Dealer Supply</div>
+                      <div>Vedika Shopeez, Shop No. 16, Kopargaon</div>
+                      <div class="muted">Phone: 9272365353 / 8484868633</div>
+                      <div class="muted">GSTIN: 27AJXPY7428G1Z7</div>
+                    </section>
                     <div class="title">Dealer Order List</div>
                     <div class="meta">
                       <div class="box">

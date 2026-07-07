@@ -86,6 +86,8 @@ public final class ApiMapper {
                 bill.getCustomerGstin(),
                 bill.getCustomerAddress(),
                 bill.getCustomerMobile(),
+                bill.getCarNumber(),
+                bill.getAadhaarNumber(),
                 bill.getInvoiceType(),
                 bill.getBillingDate(),
                 bill.getSupplyType(),
