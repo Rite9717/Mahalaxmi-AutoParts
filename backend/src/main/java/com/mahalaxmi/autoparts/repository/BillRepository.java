@@ -13,6 +13,7 @@ import org.springframework.data.jpa.repository.Query;
 public interface BillRepository extends JpaRepository<Bill, Long> {
     List<Bill> findTop100ByOrderByCreatedAtDesc();
     List<Bill> findTop100ByBillTypeOrderByCreatedAtDesc(BillType billType);
+    List<Bill> findTop200ByBillTypeOrderByBillingDateDescCreatedAtDesc(BillType billType);
     List<Bill> findTop100ByBillTypeAndStatusNotOrderByCreatedAtDesc(BillType billType, BillStatus status);
     List<Bill> findByMechanicAndBillTypeAndStatusNotOrderByCreatedAtDesc(Mechanic mechanic, BillType billType, BillStatus status);
     long countByBillTypeAndStatusNot(BillType billType, BillStatus status);
@@ -20,10 +21,12 @@ public interface BillRepository extends JpaRepository<Bill, Long> {
     long countByMechanicAndBillTypeAndStatusNot(Mechanic mechanic, BillType billType, BillStatus status);
     long countByMechanicAndBillType(Mechanic mechanic, BillType billType);
     List<Bill> findByBillingDateBetweenAndStatusNotOrderByBillingDateDescCreatedAtDesc(LocalDate start, LocalDate end, BillStatus status);
+    List<Bill> findByBillingDateBetweenAndBillTypeOrderByBillingDateDescCreatedAtDesc(LocalDate start, LocalDate end, BillType billType);
     List<Bill> findByBillingDateBetweenAndBillTypeAndStatusNotOrderByBillingDateDescCreatedAtDesc(LocalDate start, LocalDate end, BillType billType, BillStatus status);
     long countByCreatedAtAfter(Instant start);
     long countByCreatedAtAfterAndStatusNot(Instant start, BillStatus status);
     long countByCreatedAtAfterAndBillTypeAndStatusNot(Instant start, BillType billType, BillStatus status);
+    java.util.Optional<Bill> findTopByBillNumberStartingWithOrderByBillNumberDesc(String prefix);
 
     @Query("select coalesce(sum(b.grandTotal), 0) from Bill b where b.billType = 'FINAL' and b.status <> 'CANCELLED'")
     java.math.BigDecimal totalRevenue();

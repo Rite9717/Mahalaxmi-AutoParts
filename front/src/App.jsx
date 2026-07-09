@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Boxes,
@@ -153,6 +153,7 @@ function App() {
   const [cart, setCart] = useState([]);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [inventoryFocusSearch, setInventoryFocusSearch] = useState('');
   const [adminPassword] = useState(DEFAULT_ADMIN_PASSWORD);
   const [customer, setCustomer] = useState({
     customerName: 'Walk-in Customer',
@@ -172,6 +173,16 @@ function App() {
     amountReceived: '',
     notes: ''
   });
+
+  const loadBills = useCallback(async (query = '') => {
+    const billData = await api(`/bills${query}`);
+    setBills(billData);
+    return billData;
+  }, []);
+
+  const clearInventoryFocusSearch = useCallback(() => {
+    setInventoryFocusSearch('');
+  }, []);
 
   const refresh = async () => {
     const [brandData, partData, billData, ongoingBillData, mechanicData, purchaseData, manualPurchaseData, orderData, supplierData, statData] = await Promise.all([
@@ -706,7 +717,7 @@ function App() {
   const fetchPartCompatibility = async (part) => {
     setSavingRack(true);
     try {
-      const result = await api(`/parts/${part.id}/fetch-compatibility`, { method: 'POST' });
+      const result = await api(`/parts/${part.id}/fetch-compatibility-openai`, { method: 'POST' });
       setStatus(`${part.name}: ${result.message}`);
       await refresh();
       if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
@@ -722,11 +733,20 @@ function App() {
   const fetchMissingCompatibility = async () => {
     setSavingRack(true);
     try {
-      const results = await api('/parts/fetch-missing-compatibility?limit=25', { method: 'POST' });
+      const results = await api('/parts/fetch-missing-mgp-compatibility-openai?limit=10', { method: 'POST' });
       const added = results.reduce((sum, row) => sum + Number(row.matchedModels || 0), 0);
+      const updatedParts = results
+        .filter((row) => Number(row.matchedModels || 0) > 0)
+        .map((row) => row.part?.name || row.part?.partNumber || 'Item')
+        .slice(0, 3);
+      const firstUpdatedPart = results.find((row) => Number(row.matchedModels || 0) > 0)?.part;
+      if (firstUpdatedPart) {
+        setInventoryFocusSearch(firstUpdatedPart.partNumber || firstUpdatedPart.name || '');
+      }
+      const updatedText = updatedParts.length ? ` Updated: ${updatedParts.join(', ')}${updatedParts.length < results.filter((row) => Number(row.matchedModels || 0) > 0).length ? '...' : ''}` : '';
       setStatus(added > 0
-        ? `Checked ${results.length} item(s). Added ${added} compatibility model(s).`
-        : `Checked ${results.length} item(s) using company, part no., part name, and web search. Added 0 model(s).`);
+        ? `OpenAI checked ${results.length} MGP item(s). Added ${added} compatibility model(s).${updatedText} Inventory is showing the first updated item.`
+        : `OpenAI checked ${results.length} MGP item(s). Added 0 verified model(s).`);
       await refresh();
       if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
       return results;
@@ -925,14 +945,14 @@ function App() {
             {tab === 'orders' && <DealerOrders orders={orders} createDealerOrder={createDealerOrder} updateDealerOrder={updateDealerOrder} deleteDealerOrder={deleteDealerOrder} />}
             {tab === 'inventory' && (
               adminUnlocked ? (
-                <Inventory parts={allParts} brands={brands} catalogModels={catalogModels} updatePart={updatePart} deletePart={deletePart} fetchPartCompatibility={fetchPartCompatibility} fetchMissingCompatibility={fetchMissingCompatibility} savingRack={savingRack} createPart={createPart} createVehicleModel={createVehicleModel} uploadInventoryPdf={uploadInventoryPdf} saveInventoryImport={saveInventoryImport} />
+                <Inventory parts={allParts} brands={brands} catalogModels={catalogModels} focusSearch={inventoryFocusSearch} clearFocusSearch={clearInventoryFocusSearch} updatePart={updatePart} deletePart={deletePart} fetchPartCompatibility={fetchPartCompatibility} fetchMissingCompatibility={fetchMissingCompatibility} savingRack={savingRack} createPart={createPart} createVehicleModel={createVehicleModel} uploadInventoryPdf={uploadInventoryPdf} saveInventoryImport={saveInventoryImport} />
               ) : (
                 <AdminGate title="Inventory Locked" unlockAdmin={unlockAdmin} />
               )
             )}
             {tab === 'purchases' && <Purchases suppliers={suppliers} parts={allParts} purchases={purchases} manualPurchases={manualPurchases} createPurchase={createPurchase} createManualPurchase={createManualPurchase} updatePurchase={updatePurchase} />}
             {tab === 'history' && (
-              adminUnlocked ? <BillHistory bills={bills} cancelBill={cancelBill} deleteCancelledBill={deleteCancelledBill} recordPayment={recordPayment} /> : <AdminGate title="Bills Locked" unlockAdmin={unlockAdmin} />
+              adminUnlocked ? <BillHistory bills={bills} loadBills={loadBills} cancelBill={cancelBill} deleteCancelledBill={deleteCancelledBill} recordPayment={recordPayment} /> : <AdminGate title="Bills Locked" unlockAdmin={unlockAdmin} />
             )}
             {tab === 'clients' && (
               adminUnlocked ? <ManageClients mechanics={mechanics} createMechanic={createMechanic} updateMechanic={updateMechanic} deleteMechanic={deleteMechanic} ongoingBills={ongoingBills} bills={bills} recordPayment={recordPayment} /> : <AdminGate title="Manage Clients Locked" unlockAdmin={unlockAdmin} />
@@ -999,7 +1019,7 @@ function cleanSignedNumberInput(value) {
 
 function modelLabel(model) {
   if (!model) return 'Unassigned';
-  return `${model.brandName} ${model.name} ${model.series || 'Standard'}`.trim();
+  return `${model.brandName} ${model.name} ${model.series || ''}`.trim();
 }
 
 function partCompatibility(part) {
@@ -1086,7 +1106,7 @@ function BillingScreen(props) {
             <span className="text-xs font-semibold uppercase text-zinc-500">Series</span>
             <select className="field" value={selectedSeries} onChange={(event) => setSelectedSeries(event.target.value)} disabled={!selectedModelName}>
               <option value="">Select series</option>
-              {seriesOptions.map((model) => <option key={model.id} value={model.id}>{model.series || 'Standard'}</option>)}
+              {seriesOptions.map((model) => <option key={model.id} value={model.id}>{model.series || 'No series'}</option>)}
             </select>
           </label>
           <label className="space-y-1">
@@ -1554,7 +1574,7 @@ function SimpleList({ title, items }) {
   );
 }
 
-function Inventory({ parts, brands, catalogModels, updatePart, deletePart, fetchPartCompatibility, fetchMissingCompatibility, savingRack, createPart, createVehicleModel, uploadInventoryPdf, saveInventoryImport }) {
+function Inventory({ parts, brands, catalogModels, focusSearch, clearFocusSearch, updatePart, deletePart, fetchPartCompatibility, fetchMissingCompatibility, savingRack, createPart, createVehicleModel, uploadInventoryPdf, saveInventoryImport }) {
   const [stockDrafts, setStockDrafts] = useState({});
   const [rackDrafts, setRackDrafts] = useState({});
   const [purchaseDrafts, setPurchaseDrafts] = useState({});
@@ -1598,6 +1618,14 @@ function Inventory({ parts, brands, catalogModels, updatePart, deletePart, fetch
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
+
+  useEffect(() => {
+    if (!focusSearch) return;
+    setSearch(focusSearch);
+    setCompanyFilter('');
+    setPage(1);
+    clearFocusSearch?.();
+  }, [focusSearch, clearFocusSearch]);
 
   const updateImportRow = (index, field, value) => {
     setImportRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row));
@@ -1832,8 +1860,8 @@ function Inventory({ parts, brands, catalogModels, updatePart, deletePart, fetch
             <p className="text-sm text-zinc-500">Add new parts, set rack, purchase price, selling price, GST, and vehicle fitment.</p>
           </div>
           <div className="flex flex-col gap-2 md:flex-row md:items-center">
-            <button className="btn btn-secondary" disabled={savingRack} onClick={fetchMissingCompatibility} title="Fetch compatibility for items without model links">
-              <Search size={16} /> Fetch Missing Compatibility
+            <button className="btn btn-secondary" disabled={savingRack} onClick={fetchMissingCompatibility} title="Use OpenAI web research to fetch compatibility for items without model links">
+              <Search size={16} /> OpenAI Fetch Missing MGP
             </button>
             <button className="btn btn-primary" onClick={() => setShowAddForm((current) => !current)}>
               <PackageCheck size={16} /> {showAddForm ? 'Close Add Item' : 'Add Item Manually'}
@@ -1994,7 +2022,7 @@ function Inventory({ parts, brands, catalogModels, updatePart, deletePart, fetch
                       type="button"
                       disabled={savingRack || !part.partNumber}
                       onClick={() => fetchPartCompatibility(part)}
-                      title={part.partNumber ? 'Fetch compatibility online' : 'Part number needed for online lookup'}
+                      title={part.partNumber ? 'Fetch compatibility with OpenAI web research' : 'Part number needed for online lookup'}
                     >
                       <Search size={14} />
                     </button>
@@ -2118,7 +2146,7 @@ function VehicleModelForm({ brands, createVehicleModel }) {
       await createVehicleModel({
         brandName: finalBrandName,
         modelName,
-        series: series || 'Standard'
+        series
       });
       setModelName('');
       setSeries('');
@@ -2229,7 +2257,7 @@ function ManualPartForm({ brands, existingParts, onCreatePart }) {
       return;
     }
     const compatibility = selectedSeries
-      ? `${selectedBrand?.name || ''} ${selectedSeries.name} ${selectedSeries.series || 'Standard'}`.trim()
+      ? `${selectedBrand?.name || ''} ${selectedSeries.name} ${selectedSeries.series || ''}`.trim()
       : 'Universal';
     await onCreatePart({
       imageUrl: null,
@@ -2279,7 +2307,7 @@ function ManualPartForm({ brands, existingParts, onCreatePart }) {
         </select>
         <select className="field" value={seriesId} onChange={(event) => setSeriesId(event.target.value)} disabled={!modelName}>
           <option value="">Series</option>
-          {seriesOptions.map((model) => <option key={model.id} value={model.id}>{model.series || 'Standard'}</option>)}
+          {seriesOptions.map((model) => <option key={model.id} value={model.id}>{model.series || 'No series'}</option>)}
         </select>
         <input className="field" value={form.rackNumber} onChange={(event) => update('rackNumber', event.target.value.toUpperCase())} placeholder="Rack number" />
       </div>
@@ -2550,6 +2578,7 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
   const [items, setItems] = useState([]);
   const [message, setMessage] = useState('');
   const [editingOrderId, setEditingOrderId] = useState(null);
+  const [editingOrderNumber, setEditingOrderNumber] = useState('');
 
   const addItem = () => {
     const itemName = draftItem.itemName.trim();
@@ -2578,7 +2607,7 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
       setMessage('Add at least one item before saving.');
       return;
     }
-    const payload = { dealerName, orderDate, notes, items };
+    const payload = { orderNumber: editingOrderNumber, dealerName, orderDate, notes, items };
     const order = editingOrderId
       ? await updateDealerOrder(editingOrderId, payload)
       : await createDealerOrder(payload);
@@ -2590,11 +2619,12 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
       setDraftItem({ itemName: '', partNumber: '', quantity: '1', note: '' });
       setMessage('');
       setEditingOrderId(null);
+      setEditingOrderNumber('');
     }
   };
 
   const printOrder = async () => {
-    const payload = { dealerName, orderDate, notes, items };
+    const payload = { orderNumber: editingOrderNumber, dealerName, orderDate, notes, items };
     if (editingOrderId) {
       const order = await updateDealerOrder(editingOrderId, payload);
       if (order) window.open(printUrlForOrder(order), '_blank');
@@ -2676,6 +2706,7 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
             {editingOrderId && (
               <button className="btn btn-secondary" type="button" onClick={() => {
                 setEditingOrderId(null);
+                setEditingOrderNumber('');
                 setDealerName('');
                 setOrderDate(new Date().toISOString().slice(0, 10));
                 setNotes('');
@@ -2710,6 +2741,7 @@ function DealerOrders({ orders, createDealerOrder, updateDealerOrder, deleteDeal
                 <div className="flex items-center gap-2">
                   <button className="btn btn-secondary" onClick={() => {
                     setEditingOrderId(order.id);
+                    setEditingOrderNumber(order.orderNumber || '');
                     setDealerName(order.dealerName || '');
                     setOrderDate(order.orderDate || new Date().toISOString().slice(0, 10));
                     setNotes(order.notes || '');
@@ -3101,7 +3133,7 @@ function ManageClients({ mechanics, createMechanic, updateMechanic, deleteMechan
   );
 }
 
-function BillHistory({ bills, cancelBill, deleteCancelledBill, recordPayment }) {
+function BillHistory({ bills, loadBills, cancelBill, deleteCancelledBill, recordPayment }) {
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState('ALL');
   const [filterDate, setFilterDate] = useState('');
@@ -3128,6 +3160,15 @@ function BillHistory({ bills, cancelBill, deleteCancelledBill, recordPayment }) 
     setPage(1);
   }, [filter, filterDate, filterMonth]);
 
+  useEffect(() => {
+    const query = filterDate
+      ? `?date=${encodeURIComponent(filterDate)}`
+      : filterMonth
+        ? `?month=${encodeURIComponent(filterMonth)}`
+        : '';
+    loadBills(query).catch(() => {});
+  }, [filterDate, filterMonth, loadBills]);
+
   return (
     <section className="panel p-4">
       <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -3139,8 +3180,8 @@ function BillHistory({ bills, cancelBill, deleteCancelledBill, recordPayment }) 
             <option value="PENDING">Pending / partial</option>
             <option value="CANCELLED">Cancelled</option>
           </select>
-          <input className="field" type="date" value={filterDate} onChange={(event) => setFilterDate(event.target.value)} />
-          <input className="field" type="month" value={filterMonth} onChange={(event) => setFilterMonth(event.target.value)} />
+          <input className="field" type="date" value={filterDate} onChange={(event) => setFilterDate(event.target.value)} title="Invoice date" />
+          <input className="field" type="month" value={filterMonth} onChange={(event) => setFilterMonth(event.target.value)} title="Invoice month" />
         </div>
       </div>
       <div className="space-y-3">

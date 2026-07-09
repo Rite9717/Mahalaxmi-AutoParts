@@ -8,6 +8,7 @@ import com.mahalaxmi.autoparts.repository.StockTransactionRepository;
 import com.mahalaxmi.autoparts.service.CompatibilityLookupService;
 import com.mahalaxmi.autoparts.service.InventoryService;
 import com.mahalaxmi.autoparts.service.OllamaService;
+import com.mahalaxmi.autoparts.service.OpenAiCompatibilityService;
 import jakarta.validation.Valid;
 import java.util.List;
 
@@ -41,6 +42,7 @@ public class PartController {
     private final CompatibilityLookupService compatibilityLookup;
     private final String adminPassword;
     private final OllamaService ollamaService;
+    private final OpenAiCompatibilityService openAiCompatibility;
 
     public PartController(
             PartRepository parts,
@@ -49,7 +51,9 @@ public class PartController {
             StockTransactionRepository transactions,
             InventoryService inventory,
             CompatibilityLookupService compatibilityLookup,
-            @Value("${app.admin.password:1234}") String adminPassword, OllamaService ollamaService
+            @Value("${app.admin.password:1234}") String adminPassword,
+            OllamaService ollamaService,
+            OpenAiCompatibilityService openAiCompatibility
     ) {
         this.parts = parts;
         this.billItems = billItems;
@@ -59,6 +63,7 @@ public class PartController {
         this.compatibilityLookup = compatibilityLookup;
         this.adminPassword = adminPassword;
         this.ollamaService = ollamaService;
+        this.openAiCompatibility = openAiCompatibility;
     }
 
     @GetMapping("/parts")
@@ -88,12 +93,27 @@ public class PartController {
 
     @PostMapping("/parts/{id}/fetch-compatibility")
     public Dtos.CompatibilityFetchResponse fetchCompatibility(@PathVariable long id) {
-        return compatibilityLookup.fetchForPart(id);
+        return openAiCompatibility.fetchAndSave(id);
     }
 
     @PostMapping("/parts/fetch-missing-compatibility")
     public List<Dtos.CompatibilityFetchResponse> fetchMissingCompatibility(@RequestParam(defaultValue = "25") int limit) {
-        return compatibilityLookup.fetchMissing(limit);
+        return openAiCompatibility.fetchMissing(limit);
+    }
+
+    @PostMapping("/parts/{id}/fetch-compatibility-openai")
+    public Dtos.CompatibilityFetchResponse fetchCompatibilityOpenAi(@PathVariable long id) {
+        return openAiCompatibility.fetchAndSave(id);
+    }
+
+    @PostMapping("/parts/fetch-missing-compatibility-openai")
+    public List<Dtos.CompatibilityFetchResponse> fetchMissingCompatibilityOpenAi(@RequestParam(defaultValue = "10") int limit) {
+        return openAiCompatibility.fetchMissing(limit);
+    }
+
+    @PostMapping("/parts/fetch-missing-mgp-compatibility-openai")
+    public List<Dtos.CompatibilityFetchResponse> fetchMissingMgpCompatibilityOpenAi(@RequestParam(defaultValue = "10") int limit) {
+        return openAiCompatibility.fetchMissingMgp(limit);
     }
 
     @GetMapping("/parts/{id}/compatibility-ai-preview")

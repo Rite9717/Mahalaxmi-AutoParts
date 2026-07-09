@@ -181,6 +181,15 @@ public class CompatibilityLookupService {
                     This part does not fit Maruti Suzuki Dzire or Swift Dzire.
                     """);
         }
+        if ("41800M79F62".equalsIgnoreCase(partNumber)) {
+            return Optional.of("""
+                    Part number 41800M79F62 ABSORBER ASSY, REAR SHOCK fits:
+                    Maruti Suzuki WagonR Type 1 models manufactured between 2000 and 2010.
+                    Maruti Suzuki WagonR Type 2 models manufactured between 2000 and 2010.
+                    Maruti Suzuki Zen Estilo Type 1 with 1.1L engine.
+                    Maruti Suzuki Zen Estilo Type 2 with 1.0L K-Series engine.
+                    """);
+        }
         return Optional.empty();
     }
 

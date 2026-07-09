@@ -479,6 +479,7 @@ public final class Dtos {
     }
 
     public record DealerOrderUpdateRequest(
+            String orderNumber,
             String dealerName,
             LocalDate orderDate,
             String notes,

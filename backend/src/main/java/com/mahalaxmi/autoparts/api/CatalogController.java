@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.transaction.annotation.Transactional;
 
+import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 @RestController
@@ -48,7 +49,13 @@ public class CatalogController {
     public Dtos.ModelResponse createModel(@Valid @RequestBody Dtos.ModelRequest request) {
         String brandName = request.brandName().trim();
         String modelName = request.modelName().trim().toUpperCase();
-        String series = request.series() == null || request.series().trim().isBlank() ? "STANDARD" : request.series().trim().toUpperCase();
+        String series = request.series() == null ? "" : request.series().trim().toUpperCase();
+        if (modelName.equals("STANDARD") || modelName.equals("UNIVERSAL") || modelName.equals("ALL")) {
+            throw new ResponseStatusException(BAD_REQUEST, "Enter the actual car model name, not STANDARD.");
+        }
+        if (series.isBlank() || series.equals("STANDARD")) {
+            throw new ResponseStatusException(BAD_REQUEST, "Enter model type or series, for example TYPE 1, TYPE 2, VDI, ZDI.");
+        }
         var brand = brands.findByName(brandName).orElseGet(() -> {
             var created = new com.mahalaxmi.autoparts.domain.CarBrand();
             created.setName(brandName);

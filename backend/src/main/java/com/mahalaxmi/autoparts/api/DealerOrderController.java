@@ -74,7 +74,11 @@ public class DealerOrderController {
     @PutMapping("/{id}")
     @Transactional
     public Dtos.DealerOrderResponse update(@PathVariable long id, @Valid @RequestBody Dtos.DealerOrderUpdateRequest request) {
-        DealerOrder order = orders.findById(id).orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Order not found"));
+        DealerOrder order = orders.findById(id)
+                .or(() -> request.orderNumber() == null || request.orderNumber().isBlank()
+                        ? java.util.Optional.empty()
+                        : orders.findByOrderNumber(request.orderNumber().trim()))
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Order not found"));
         if (request.items() == null || request.items().isEmpty()) {
             throw new ResponseStatusException(BAD_REQUEST, "Order must contain at least one item");
         }

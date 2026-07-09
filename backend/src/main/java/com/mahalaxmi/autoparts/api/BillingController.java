@@ -10,6 +10,7 @@ import com.mahalaxmi.autoparts.service.InventoryService;
 import jakarta.validation.Valid;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.transaction.annotation.Transactional;
@@ -45,8 +47,18 @@ public class BillingController {
 
     @GetMapping
     @Transactional(readOnly = true)
-    public List<Dtos.BillResponse> bills() {
-        return bills.findTop100ByBillTypeOrderByCreatedAtDesc(BillType.FINAL).stream().map(ApiMapper::bill).toList();
+    public List<Dtos.BillResponse> bills(@RequestParam(required = false) LocalDate date, @RequestParam(required = false) String month) {
+        if (date != null) {
+            return bills.findByBillingDateBetweenAndBillTypeOrderByBillingDateDescCreatedAtDesc(date, date, BillType.FINAL)
+                    .stream().map(ApiMapper::bill).toList();
+        }
+        if (month != null && month.matches("\\d{4}-\\d{2}")) {
+            LocalDate start = LocalDate.parse(month + "-01");
+            LocalDate end = start.withDayOfMonth(start.lengthOfMonth());
+            return bills.findByBillingDateBetweenAndBillTypeOrderByBillingDateDescCreatedAtDesc(start, end, BillType.FINAL)
+                    .stream().map(ApiMapper::bill).toList();
+        }
+        return bills.findTop200ByBillTypeOrderByBillingDateDescCreatedAtDesc(BillType.FINAL).stream().map(ApiMapper::bill).toList();
     }
 
     @GetMapping("/ongoing")

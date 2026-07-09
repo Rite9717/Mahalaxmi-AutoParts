@@ -46,7 +46,7 @@ public class DatabaseSchemaFix {
 
     private void normalizeVehicleCatalog() {
         try {
-            jdbc.execute("update car_model set name = upper(trim(name)), series = case when series is null or trim(series) = '' then 'STANDARD' else upper(trim(series)) end");
+            jdbc.execute("update car_model set name = upper(trim(name)), series = nullif(upper(trim(coalesce(series, ''))), '')");
             jdbc.execute("insert into car_brand (name, created_at) select 'PETROL', now() where not exists (select 1 from car_brand where upper(name) = 'PETROL')");
             jdbc.execute("insert into car_brand (name, created_at) select 'DIESEL', now() where not exists (select 1 from car_brand where upper(name) = 'DIESEL')");
             jdbc.execute("""

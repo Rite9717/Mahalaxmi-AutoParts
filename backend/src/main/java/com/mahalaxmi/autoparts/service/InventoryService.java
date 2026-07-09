@@ -148,7 +148,7 @@ public class InventoryService {
     }
 
     @Transactional
-    public Bill createBill(Dtos.BillRequest request) {
+    public synchronized Bill createBill(Dtos.BillRequest request) {
         if (request.items() == null || request.items().isEmpty()) {
             throw new ResponseStatusException(BAD_REQUEST, "Bill must contain at least one item");
         }
@@ -687,8 +687,20 @@ public class InventoryService {
 
     private String nextBillNumber() {
         String prefix = "BILL-" + LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE) + "-";
-        long countToday = bills.countByCreatedAtAfter(LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault()).toInstant());
-        return prefix + String.format("%04d", countToday + 1);
+        int next = bills.findTopByBillNumberStartingWithOrderByBillNumberDesc(prefix)
+                .map(Bill::getBillNumber)
+                .map(number -> number.substring(prefix.length()))
+                .map(this::parseBillSequence)
+                .orElse(0) + 1;
+        return prefix + String.format("%04d", next);
+    }
+
+    private int parseBillSequence(String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException ex) {
+            return 0;
+        }
     }
 
     private static String trimToNull(String value) {
