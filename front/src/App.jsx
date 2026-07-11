@@ -208,11 +208,7 @@ function App() {
       setModels([]);
     }
     setAllParts(partData);
-    if (selectedSeries) {
-      setParts(await api(`/models/${selectedSeries}/parts`).catch(() => []));
-    } else {
-      setParts([]);
-    }
+    setParts([]);
     setBills(billData);
     setOngoingBills(ongoingBillData);
     setMechanics(mechanicData);
@@ -253,33 +249,23 @@ function App() {
       .catch((error) => setStatus(error.message));
   }, [selectedBrand]);
 
-  useEffect(() => {
-    if (!selectedSeries) {
-      setParts([]);
-      return;
-    }
-    api(`/models/${selectedSeries}/parts`)
-      .then(setParts)
-      .catch((error) => setStatus(error.message));
-  }, [selectedSeries]);
-
   const filteredParts = useMemo(() => {
     const needle = partSearch.trim().toLowerCase();
-    const source = selectedSeries
-      ? parts
-      : allParts.filter((part) => {
-        if (!selectedBrand) return true;
-        const linked = part.compatibleModels || [];
-        if (selectedModelName) {
-          return linked.some((model) => String(model.brandId) === String(selectedBrand) && model.name === selectedModelName);
-        }
-        return linked.some((model) => String(model.brandId) === String(selectedBrand));
+    const source = allParts.filter((part) => {
+      if (!selectedBrand) return true;
+      const linked = part.compatibleModels || [];
+      return linked.some((model) => {
+        if (String(model.brandId) !== String(selectedBrand)) return false;
+        if (selectedModelName && modelNameKey(model.name) !== modelNameKey(selectedModelName)) return false;
+        if (selectedSeries && seriesKey(model.series) !== seriesKey(selectedSeries)) return false;
+        return true;
       });
+    });
     if (!needle) return source;
     return source.filter((part) =>
       `${part.name} ${part.companyName || ''} ${part.partNumber || ''} ${part.serialNo || ''} ${part.hsnCode || ''} ${part.rackNumber || ''} ${part.sellingPrice || ''}`.toLowerCase().includes(needle)
     );
-  }, [allParts, parts, partSearch, selectedBrand, selectedModelName, selectedSeries]);
+  }, [allParts, partSearch, selectedBrand, selectedModelName, selectedSeries]);
 
   const companyOptions = useMemo(() => [...new Set(allParts.map((part) => (part.companyName || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [allParts]);
   const companyFilteredParts = useMemo(() => {
@@ -399,7 +385,6 @@ function App() {
       });
       setStatus(`${part.name} added to inventory with ${part.stockLevel} units.`);
       await refresh();
-      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
       return true;
     } catch (error) {
       setStatus(error.message);
@@ -477,7 +462,6 @@ function App() {
       });
       setStatus(`Dealer purchase saved. Stock increased by ${purchase.items.reduce((sum, item) => sum + item.quantity, 0)} units.`);
       await refresh();
-      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
       return true;
     } catch (error) {
       setStatus(error.message);
@@ -704,7 +688,6 @@ function App() {
       });
       setStatus(`Updated ${part.name}.`);
       await refresh();
-      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
       return true;
     } catch (error) {
       setStatus(error.message);
@@ -720,7 +703,6 @@ function App() {
       const result = await api(`/parts/${part.id}/fetch-compatibility-openai`, { method: 'POST' });
       setStatus(`${part.name}: ${result.message}`);
       await refresh();
-      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
       return result;
     } catch (error) {
       setStatus(error.message);
@@ -748,7 +730,6 @@ function App() {
         ? `OpenAI checked ${results.length} MGP item(s). Added ${added} compatibility model(s).${updatedText} Inventory is showing the first updated item.`
         : `OpenAI checked ${results.length} MGP item(s). Added 0 verified model(s).`);
       await refresh();
-      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
       return results;
     } catch (error) {
       setStatus(error.message);
@@ -774,7 +755,6 @@ function App() {
       });
       setStatus(`Deleted ${part.name}.`);
       await refresh();
-      if (selectedSeries) setParts(await api(`/models/${selectedSeries}/parts`));
       return true;
     } catch (error) {
       setStatus(error.message);
@@ -821,8 +801,20 @@ function App() {
     return saved;
   };
 
-  const modelNames = [...new Set(models.map((model) => model.name))].sort();
-  const seriesOptions = models.filter((model) => model.name === selectedModelName);
+  const modelNameMap = new Map();
+  models.forEach((model) => {
+    const key = modelNameKey(model.name);
+    if (key && !modelNameMap.has(key)) modelNameMap.set(key, model.name);
+  });
+  const modelNames = [...modelNameMap.values()].sort((a, b) => a.localeCompare(b));
+  const seriesMap = new Map();
+  models
+    .filter((model) => modelNameKey(model.name) === modelNameKey(selectedModelName))
+    .forEach((model) => {
+      const key = seriesKey(model.series);
+      if (key && !seriesMap.has(key)) seriesMap.set(key, model.series);
+    });
+  const seriesOptions = [...seriesMap.values()].sort((a, b) => seriesKey(a).localeCompare(seriesKey(b)));
   const changeTab = (nextTab) => {
     if (nextTab === 'inventory' || nextTab === 'history' || nextTab === 'ongoing' || nextTab === 'clients') {
       setAdminUnlocked(false);
@@ -1022,6 +1014,25 @@ function modelLabel(model) {
   return `${model.brandName} ${model.name} ${model.series || ''}`.trim();
 }
 
+function modelNameKey(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .replace(/^SWIFT DZIRE$/, 'DZIRE')
+    .replace(/^WAGON R$/, 'WAGONR')
+    .replace(/^WAGONAR$/, 'WAGONR');
+}
+
+function seriesKey(value) {
+  return String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/TYPE-([0-9])/g, 'TYPE $1')
+    .replace(/TYPE([0-9])/g, 'TYPE $1')
+    .replace(/\s+/g, ' ');
+}
+
 function partCompatibility(part) {
   const linked = (part.compatibleModels || []).map(modelLabel).join(', ');
   return linked || part.carCompatibility || 'Universal';
@@ -1106,7 +1117,7 @@ function BillingScreen(props) {
             <span className="text-xs font-semibold uppercase text-zinc-500">Series</span>
             <select className="field" value={selectedSeries} onChange={(event) => setSelectedSeries(event.target.value)} disabled={!selectedModelName}>
               <option value="">Select series</option>
-              {seriesOptions.map((model) => <option key={model.id} value={model.id}>{model.series || 'No series'}</option>)}
+              {seriesOptions.map((series) => <option key={seriesKey(series)} value={series}>{series}</option>)}
             </select>
           </label>
           <label className="space-y-1">
